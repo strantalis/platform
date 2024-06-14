@@ -75,12 +75,25 @@ func (s KeyAccessServerRegistry) ListKeyAccessServers(ctx context.Context,
 func (s KeyAccessServerRegistry) GetKeyAccessServer(ctx context.Context,
 	req *kasr.GetKeyAccessServerRequest,
 ) (*kasr.GetKeyAccessServerResponse, error) {
-	keyAccessServer, err := s.dbClient.GetKeyAccessServer(ctx, req.GetId())
+	keyAccessServer, err := s.dbClient.GetKeyAccessServerByID(ctx, req.GetId())
 	if err != nil {
 		return nil, db.StatusifyError(err, db.ErrTextGetRetrievalFailed, slog.String("id", req.GetId()))
 	}
 
 	return &kasr.GetKeyAccessServerResponse{
+		KeyAccessServer: keyAccessServer,
+	}, nil
+}
+
+func (s KeyAccessServerRegistry) GetKeyAccessServerByIdentifier(ctx context.Context,
+	req *kasr.GetKeyAccessServerByIdentifierRequest,
+) (*kasr.GetKeyAccessServerByIdentifierResponse, error) {
+	keyAccessServer, err := s.dbClient.GetKeyAccessServerByIndentifier(ctx, req.GetIdentifier())
+	if err != nil {
+		return nil, db.StatusifyError(err, db.ErrTextGetRetrievalFailed, slog.String("identifier", req.GetIdentifier()))
+	}
+
+	return &kasr.GetKeyAccessServerByIdentifierResponse{
 		KeyAccessServer: keyAccessServer,
 	}, nil
 }
@@ -96,7 +109,7 @@ func (s KeyAccessServerRegistry) UpdateKeyAccessServer(ctx context.Context,
 		ObjectID:   kasID,
 	}
 
-	originalKAS, err := s.dbClient.GetKeyAccessServer(ctx, kasID)
+	originalKAS, err := s.dbClient.GetKeyAccessServerByID(ctx, kasID)
 	if err != nil {
 		s.logger.Audit.PolicyCRUDFailure(ctx, auditParams)
 		return nil, db.StatusifyError(err, db.ErrTextGetRetrievalFailed, slog.String("id", kasID))
@@ -110,7 +123,7 @@ func (s KeyAccessServerRegistry) UpdateKeyAccessServer(ctx context.Context,
 
 	// UpdateKeyAccessServer only returns the ID of the updated KAS, so we need to
 	// fetch the updated KAS to compute the audit diff
-	updatedKAS, err := s.dbClient.GetKeyAccessServer(ctx, kasID)
+	updatedKAS, err := s.dbClient.GetKeyAccessServerByID(ctx, kasID)
 	if err != nil {
 		s.logger.Audit.PolicyCRUDFailure(ctx, auditParams)
 		return nil, db.StatusifyError(err, db.ErrTextGetRetrievalFailed, slog.String("id", kasID))

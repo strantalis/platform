@@ -21,7 +21,8 @@ type IntegrityInformation struct {
 
 type KeyAccess struct {
 	KeyType           string `json:"type"`
-	KasURL            string `json:"url"`
+	KasURL            string `json:"url,omitempty"`
+	KasURN            string `json:"urn,omitempty"`
 	Protocol          string `json:"protocol"`
 	WrappedKey        string `json:"wrappedKey"`
 	PolicyBinding     string `json:"policyBinding"`

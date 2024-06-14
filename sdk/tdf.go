@@ -2,6 +2,7 @@ package sdk
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/opentdf/platform/lib/ocrypto"
+	kasr "github.com/opentdf/platform/protocol/go/policy/kasregistry"
 	"github.com/opentdf/platform/sdk/auth"
 	"github.com/opentdf/platform/sdk/internal/archive"
 	"google.golang.org/grpc"
@@ -70,6 +72,7 @@ type Reader struct {
 	payloadSize         int64
 	payloadKey          []byte
 	kasSessionKey       ocrypto.RsaKeyPair
+	rsdk                SDK
 }
 
 type TDFObject struct {
@@ -275,6 +278,11 @@ func (t *TDFObject) prepareManifest(tdfConfig TDFConfig) error { //nolint:funlen
 		keyAccess := KeyAccess{}
 		keyAccess.KeyType = kWrapped
 		keyAccess.KasURL = kasInfo.URL
+
+		// If is URN is not empty then use it
+		if kasInfo.URN != "" {
+			keyAccess.KasURN = kasInfo.URN
+		}
 		keyAccess.KID = kasInfo.KID
 		keyAccess.Protocol = kKasProtocol
 
@@ -389,6 +397,7 @@ func (s SDK) LoadTDF(reader io.ReadSeeker) (*Reader, error) {
 		tdfReader:     tdfReader,
 		manifest:      *manifestObj,
 		kasSessionKey: s.kasSessionKey,
+		rsdk:          s,
 	}, nil
 }
 
@@ -621,7 +630,16 @@ func (r *Reader) doPayloadKeyUnwrap() error { //nolint:gocognit // Better readab
 	var unencryptedMetadata []byte
 	var payloadKey [kKeySize]byte
 	for _, keyAccessObj := range r.manifest.EncryptionInformation.KeyAccessObjs {
-		client, err := newKASClient(r.dialOptions, r.tokenSource, r.kasSessionKey)
+		kurl := keyAccessObj.KasURL
+		if keyAccessObj.KasURN != "" {
+			kresp, err := r.rsdk.KeyAccessServerRegistry.GetKeyAccessServerByIdentifier(context.Background(), &kasr.GetKeyAccessServerByIdentifierRequest{Identifier: keyAccessObj.KasURN})
+			if err != nil {
+				return fmt.Errorf("failed to resolve kas by URN: %w", err)
+			}
+			kurl = kresp.KeyAccessServer.GetUri()
+		}
+
+		client, err := newKASClient(r.dialOptions, r.tokenSource, r.kasSessionKey, kurl)
 		if err != nil {
 			return fmt.Errorf("newKASClient failed:%w", err)
 		}

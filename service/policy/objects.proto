@@ -142,21 +142,21 @@ message SubjectMapping {
 }
 
 /**
-  A Condition defines a rule of <the value at the flattened 'selector value' location> <operator> <subject external values>
-    
-  Example:  Subjects with a field selected by the flattened selector "'.division'" and a value of "Accounting" or "Marketing":
-   {
-     "subject_external_selector_value": "'.division'",
-     "operator": "SUBJECT_MAPPING_OPERATOR_ENUM_IN",
-     "subject_external_values" : ["Accounting", "Marketing"]
-   }
+   A Condition defines a rule of <the value at the flattened 'selector value' location> <operator> <subject external values>
 
-   Example: Subjects that are not part of the Fantastic Four according to their alias field:
-   {
-     "subject_external_selector_value": "'.data[0].alias'",
-     "operator": "SUBJECT_MAPPING_OPERATOR_ENUM_NOT_IN",
-     "subject_external_values" : ["mister_fantastic", "the_thing", "human_torch", "invisible_woman"]
-   }
+   Example:  Subjects with a field selected by the flattened selector "'.division'" and a value of "Accounting" or "Marketing":
+    {
+      "subject_external_selector_value": "'.division'",
+      "operator": "SUBJECT_MAPPING_OPERATOR_ENUM_IN",
+      "subject_external_values" : ["Accounting", "Marketing"]
+    }
+
+    Example: Subjects that are not part of the Fantastic Four according to their alias field:
+    {
+      "subject_external_selector_value": "'.data[0].alias'",
+      "operator": "SUBJECT_MAPPING_OPERATOR_ENUM_NOT_IN",
+      "subject_external_values" : ["mister_fantastic", "the_thing", "human_torch", "invisible_woman"]
+    }
 */
 message Condition {
   // a selector for a field value on a flattened Entity Representation (such as from idP/LDAP)
@@ -237,6 +237,8 @@ message KeyAccessServer {
   // Address of a KAS instance
   string uri = 2;
   PublicKey public_key = 3;
+  // Unique Identifier for the KAS
+  string identifier = 4;
 
   // Common metadata
   common.Metadata metadata = 100;

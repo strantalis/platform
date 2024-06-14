@@ -68,6 +68,36 @@
         ]
       }
     },
+    "/key-access-servers/identifier/{identifier}": {
+      "get": {
+        "operationId": "KeyAccessServerRegistryService_GetKeyAccessServerByIdentifier",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/kasregistryGetKeyAccessServerByIdentifierResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "identifier",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "KeyAccessServerRegistryService"
+        ]
+      }
+    },
     "/key-access-servers/{id}": {
       "get": {
         "operationId": "KeyAccessServerRegistryService_GetKeyAccessServer",
@@ -235,6 +265,10 @@
         "publicKey": {
           "$ref": "#/definitions/policyPublicKey"
         },
+        "identifier": {
+          "type": "string",
+          "title": "This is the identifier of the key access server and can't be changed"
+        },
         "metadata": {
           "$ref": "#/definitions/commonMetadataMutable",
           "title": "Common metadata"
@@ -250,6 +284,14 @@
       }
     },
     "kasregistryDeleteKeyAccessServerResponse": {
+      "type": "object",
+      "properties": {
+        "keyAccessServer": {
+          "$ref": "#/definitions/policyKeyAccessServer"
+        }
+      }
+    },
+    "kasregistryGetKeyAccessServerByIdentifierResponse": {
       "type": "object",
       "properties": {
         "keyAccessServer": {
@@ -297,6 +339,10 @@
         },
         "publicKey": {
           "$ref": "#/definitions/policyPublicKey"
+        },
+        "identifier": {
+          "type": "string",
+          "title": "Unique Identifier for the KAS"
         },
         "metadata": {
           "$ref": "#/definitions/commonMetadata",

@@ -572,6 +572,10 @@
         "publicKey": {
           "$ref": "#/definitions/policyPublicKey"
         },
+        "identifier": {
+          "type": "string",
+          "title": "Unique Identifier for the KAS"
+        },
         "metadata": {
           "$ref": "#/definitions/commonMetadata",
           "title": "Common metadata"

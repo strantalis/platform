@@ -12,6 +12,7 @@ import (
 	"github.com/lestrrat-go/jwx/v2/jwt"
 	"github.com/opentdf/platform/lib/ocrypto"
 	"github.com/opentdf/platform/protocol/go/kas"
+	kasr "github.com/opentdf/platform/protocol/go/policy/kasregistry"
 	"github.com/opentdf/platform/sdk/auth"
 	"google.golang.org/grpc"
 )
@@ -31,6 +32,7 @@ type KASClient struct {
 	dialOptions        []grpc.DialOption
 	clientPublicKeyPEM string
 	asymDecryption     ocrypto.AsymDecryption
+	kurl               string
 }
 
 // once the backend moves over we should use the same type that the golang backend uses here
@@ -42,7 +44,7 @@ type rewrapRequestBody struct {
 	SchemaVersion   string    `json:"schemaVersion,omitempty"`
 }
 
-func newKASClient(dialOptions []grpc.DialOption, accessTokenSource auth.AccessTokenSource, sessionKey ocrypto.RsaKeyPair) (*KASClient, error) {
+func newKASClient(dialOptions []grpc.DialOption, accessTokenSource auth.AccessTokenSource, sessionKey ocrypto.RsaKeyPair, kurl string) (*KASClient, error) {
 	clientPublicKey, err := sessionKey.PublicKeyInPemFormat()
 	if err != nil {
 		return nil, fmt.Errorf("ocrypto.PublicKeyInPemFormat failed: %w", err)
@@ -63,6 +65,7 @@ func newKASClient(dialOptions []grpc.DialOption, accessTokenSource auth.AccessTo
 		dialOptions:        dialOptions,
 		clientPublicKeyPEM: clientPublicKey,
 		asymDecryption:     asymDecryption,
+		kurl:               kurl,
 	}, nil
 }
 
@@ -72,7 +75,8 @@ func (k *KASClient) makeRewrapRequest(keyAccess KeyAccess, policy string) (*kas.
 	if err != nil {
 		return nil, err
 	}
-	grpcAddress, err := getGRPCAddress(keyAccess.KasURL)
+
+	grpcAddress, err := getGRPCAddress(k.kurl)
 	if err != nil {
 		return nil, err
 	}
@@ -292,13 +296,24 @@ type publicKeyWithID struct {
 }
 
 func (s SDK) getPublicKey(kasInfo KASInfo) (*publicKeyWithID, error) {
-	grpcAddress, err := getGRPCAddress(kasInfo.URL)
+	kurl := kasInfo.URL
+
+	// If a urn is provided, we need to look up the KAS URL
+	if kasInfo.URN != "" {
+		kresp, err := s.KeyAccessServerRegistry.GetKeyAccessServerByIdentifier(context.Background(), &kasr.GetKeyAccessServerByIdentifierRequest{Identifier: kasInfo.URN})
+		if err != nil {
+			return nil, fmt.Errorf("error getting key access server by identifier: %w", err)
+		}
+		kurl = kresp.KeyAccessServer.Uri
+	}
+
+	grpcAddress, err := getGRPCAddress(kurl)
 	if err != nil {
 		return nil, err
 	}
 	conn, err := grpc.Dial(grpcAddress, s.dialOptions...)
 	if err != nil {
-		return nil, fmt.Errorf("error connecting to grpc service at %s: %w", kasInfo.URL, err)
+		return nil, fmt.Errorf("error connecting to grpc service at %s: %w", kurl, err)
 	}
 	defer conn.Close()
 

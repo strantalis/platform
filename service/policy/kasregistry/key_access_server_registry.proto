@@ -14,6 +14,13 @@ message GetKeyAccessServerResponse {
   KeyAccessServer key_access_server = 1;
 }
 
+message GetKeyAccessServerByIdentifierRequest {
+  string identifier = 1 [(buf.validate.field).required = true];
+}
+message GetKeyAccessServerByIdentifierResponse {
+  KeyAccessServer key_access_server = 1;
+}
+
 message ListKeyAccessServersRequest {}
 message ListKeyAccessServersResponse {
   repeated KeyAccessServer key_access_servers = 1;
@@ -23,6 +30,8 @@ message CreateKeyAccessServerRequest {
   // Required
   string uri = 1 [(buf.validate.field).required = true];
   PublicKey public_key = 2 [(buf.validate.field).required = true];
+  // This is the identifier of the key access server and can't be changed
+  string identifier = 3 [(buf.validate.field).required = true];
 
   // Common metadata
   common.MetadataMutable metadata = 100;
@@ -59,6 +68,10 @@ service KeyAccessServerRegistryService {
 
   rpc GetKeyAccessServer(GetKeyAccessServerRequest) returns (GetKeyAccessServerResponse) {
     option (google.api.http) = {get: "/key-access-servers/{id}"};
+  }
+
+  rpc GetKeyAccessServerByIdentifier(GetKeyAccessServerByIdentifierRequest) returns (GetKeyAccessServerByIdentifierResponse) {
+    option (google.api.http) = {get: "/key-access-servers/identifier/{identifier}"};
   }
 
   rpc CreateKeyAccessServer(CreateKeyAccessServerRequest) returns (CreateKeyAccessServerResponse) {

@@ -16,6 +16,7 @@ func keyAccessServerSelect() sq.SelectBuilder {
 	return db.NewStatementBuilder().
 		Select(
 			"id",
+			"identifier",
 			"uri",
 			"public_key",
 			"metadata",
@@ -46,12 +47,13 @@ func (c PolicyDBClient) ListKeyAccessServers(ctx context.Context) ([]*policy.Key
 
 	var (
 		id            string
+		identifier    string
 		uri           string
 		publicKeyJSON []byte
 		metadataJSON  []byte
 	)
 
-	_, err = pgx.ForEachRow(rows, []any{&id, &uri, &publicKeyJSON, &metadataJSON}, func() error {
+	_, err = pgx.ForEachRow(rows, []any{&id, &identifier, &uri, &publicKeyJSON, &metadataJSON}, func() error {
 		var (
 			keyAccessServer = new(policy.KeyAccessServer)
 			publicKey       = new(policy.PublicKey)
@@ -69,6 +71,7 @@ func (c PolicyDBClient) ListKeyAccessServers(ctx context.Context) ([]*policy.Key
 		}
 
 		keyAccessServer.Id = id
+		keyAccessServer.Identifier = identifier
 		keyAccessServer.Uri = uri
 		keyAccessServer.PublicKey = publicKey
 		keyAccessServer.Metadata = metadata
@@ -91,28 +94,53 @@ func getKeyAccessServerSQL(id string) (string, []interface{}, error) {
 		ToSql()
 }
 
-func (c PolicyDBClient) GetKeyAccessServer(ctx context.Context, id string) (*policy.KeyAccessServer, error) {
+func getKeyAccessServerByIdentifierSQL(identifier string) (string, []interface{}, error) {
+	return keyAccessServerSelect().
+		Where(sq.Eq{"identifier": identifier}).
+		From(Tables.KeyAccessServerRegistry.Name()).
+		ToSql()
+}
+
+func (c PolicyDBClient) GetKeyAccessServerByIndentifier(ctx context.Context, identifier string) (*policy.KeyAccessServer, error) {
+	sql, args, err := getKeyAccessServerByIdentifierSQL(identifier)
+	if err != nil {
+		return nil, err
+	}
+
+	return c.getKeyAccessServer(ctx, sql, args...)
+}
+
+func (c PolicyDBClient) GetKeyAccessServerByID(ctx context.Context, id string) (*policy.KeyAccessServer, error) {
 	sql, args, err := getKeyAccessServerSQL(id)
 	if err != nil {
 		return nil, err
 	}
 
+	return c.getKeyAccessServer(ctx, sql, args...)
+}
+
+func (c PolicyDBClient) getKeyAccessServer(ctx context.Context, sql string, args ...interface{}) (*policy.KeyAccessServer, error) {
 	row, err := c.QueryRow(ctx, sql, args)
 	if err != nil {
 		return nil, err
 	}
 
 	var (
+		id            string
+		identifier    string
 		uri           string
 		publicKeyJSON []byte
-		publicKey     = new(policy.PublicKey)
 		metadataJSON  []byte
-		metadata      = new(common.Metadata)
 	)
-	err = row.Scan(&id, &uri, &publicKeyJSON, &metadataJSON)
+	err = row.Scan(&id, &identifier, &uri, &publicKeyJSON, &metadataJSON)
 	if err != nil {
 		return nil, db.WrapIfKnownInvalidQueryErr(err)
 	}
+
+	var (
+		publicKey = new(policy.PublicKey)
+		metadata  = new(common.Metadata)
+	)
 
 	if err := protojson.Unmarshal(publicKeyJSON, publicKey); err != nil {
 		return nil, err
@@ -125,18 +153,19 @@ func (c PolicyDBClient) GetKeyAccessServer(ctx context.Context, id string) (*pol
 	}
 
 	return &policy.KeyAccessServer{
-		Metadata:  metadata,
-		Id:        id,
-		Uri:       uri,
-		PublicKey: publicKey,
+		Metadata:   metadata,
+		Id:         id,
+		Identifier: identifier,
+		Uri:        uri,
+		PublicKey:  publicKey,
 	}, nil
 }
 
-func createKeyAccessServerSQL(uri string, publicKey, metadata []byte) (string, []interface{}, error) {
+func createKeyAccessServerSQL(uri, identifier string, publicKey, metadata []byte) (string, []interface{}, error) {
 	return db.NewStatementBuilder().
 		Insert(Tables.KeyAccessServerRegistry.Name()).
-		Columns("uri", "public_key", "metadata").
-		Values(uri, publicKey, metadata).
+		Columns("uri", "public_key", "identifier", "metadata").
+		Values(uri, publicKey, identifier, metadata).
 		Suffix("RETURNING \"id\"").
 		ToSql()
 }
@@ -152,7 +181,7 @@ func (c PolicyDBClient) CreateKeyAccessServer(ctx context.Context, r *kasregistr
 		return nil, err
 	}
 
-	sql, args, err := createKeyAccessServerSQL(r.GetUri(), pkBytes, metadataBytes)
+	sql, args, err := createKeyAccessServerSQL(r.GetUri(), r.GetIdentifier(), pkBytes, metadataBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -195,7 +224,7 @@ func updateKeyAccessServerSQL(id, uri string, publicKey, metadata []byte) (strin
 func (c PolicyDBClient) UpdateKeyAccessServer(ctx context.Context, id string, r *kasregistry.UpdateKeyAccessServerRequest) (*policy.KeyAccessServer, error) {
 	// if extend we need to merge the metadata
 	metadataJSON, _, err := db.MarshalUpdateMetadata(r.GetMetadata(), r.GetMetadataUpdateBehavior(), func() (*common.Metadata, error) {
-		k, err := c.GetKeyAccessServer(ctx, id)
+		k, err := c.GetKeyAccessServerByID(ctx, id)
 		if err != nil {
 			return nil, err
 		}

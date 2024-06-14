@@ -777,7 +777,7 @@ func (s SDK) ReadNanoTDF(writer io.Writer, reader io.ReadSeeker) (uint32, error)
 		return 0, fmt.Errorf("ocrypto.NewRSAKeyPair failed: %w", err)
 	}
 
-	client, err := newKASClient(s.dialOptions, s.tokenSource, rsaKeyPair)
+	client, err := newKASClient(s.dialOptions, s.tokenSource, rsaKeyPair, header.kasURL.body)
 	if err != nil {
 		return 0, fmt.Errorf("newKASClient failed: %w", err)
 	}

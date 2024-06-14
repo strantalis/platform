@@ -76,11 +76,12 @@ func encrypt(cmd *cobra.Command, args []string) error {
 
 	if !nanoFormat {
 		tdf, err := client.CreateTDF(out, in,
-			sdk.WithDataAttributes(attributes...),
+			//sdk.WithDataAttributes(attributes...),
 			sdk.WithKasInformation(
 				sdk.KASInfo{
 					// examples assume insecure http
-					URL:       fmt.Sprintf("http://%s", platformEndpoint),
+					//URL:       fmt.Sprintf("http://%s", platformEndpoint),
+					URN:       "kas-1",
 					PublicKey: "",
 				}))
 		if err != nil {

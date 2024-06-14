@@ -672,6 +672,14 @@
                 </li>
               
                 <li>
+                  <a href="#policy.kasregistry.GetKeyAccessServerByIdentifierRequest"><span class="badge">M</span>GetKeyAccessServerByIdentifierRequest</a>
+                </li>
+              
+                <li>
+                  <a href="#policy.kasregistry.GetKeyAccessServerByIdentifierResponse"><span class="badge">M</span>GetKeyAccessServerByIdentifierResponse</a>
+                </li>
+              
+                <li>
                   <a href="#policy.kasregistry.GetKeyAccessServerRequest"><span class="badge">M</span>GetKeyAccessServerRequest</a>
                 </li>
               
@@ -1376,6 +1384,13 @@
                   <td><a href="#policy.PublicKey">PublicKey</a></td>
                   <td></td>
                   <td><p> </p></td>
+                </tr>
+              
+                <tr>
+                  <td>identifier</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>Unique Identifier for the KAS </p></td>
                 </tr>
               
                 <tr>
@@ -4645,6 +4660,13 @@ Attribute &lt;&gt; Key Access Server RPCs
                 </tr>
               
                 <tr>
+                  <td>identifier</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p>This is the identifier of the key access server and can&#39;t be changed </p></td>
+                </tr>
+              
+                <tr>
                   <td>metadata</td>
                   <td><a href="#common.MetadataMutable">common.MetadataMutable</a></td>
                   <td></td>
@@ -4707,6 +4729,54 @@ Attribute &lt;&gt; Key Access Server RPCs
         
       
         <h3 id="policy.kasregistry.DeleteKeyAccessServerResponse">DeleteKeyAccessServerResponse</h3>
+        <p></p>
+
+        
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+              
+                <tr>
+                  <td>key_access_server</td>
+                  <td><a href="#policy.KeyAccessServer">policy.KeyAccessServer</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+              
+            </tbody>
+          </table>
+
+          
+
+        
+      
+        <h3 id="policy.kasregistry.GetKeyAccessServerByIdentifierRequest">GetKeyAccessServerByIdentifierRequest</h3>
+        <p></p>
+
+        
+          <table class="field-table">
+            <thead>
+              <tr><td>Field</td><td>Type</td><td>Label</td><td>Description</td></tr>
+            </thead>
+            <tbody>
+              
+                <tr>
+                  <td>identifier</td>
+                  <td><a href="#string">string</a></td>
+                  <td></td>
+                  <td><p> </p></td>
+                </tr>
+              
+            </tbody>
+          </table>
+
+          
+
+        
+      
+        <h3 id="policy.kasregistry.GetKeyAccessServerByIdentifierResponse">GetKeyAccessServerByIdentifierResponse</h3>
         <p></p>
 
         
@@ -4914,6 +4984,13 @@ Attribute &lt;&gt; Key Access Server RPCs
               </tr>
             
               <tr>
+                <td>GetKeyAccessServerByIdentifier</td>
+                <td><a href="#policy.kasregistry.GetKeyAccessServerByIdentifierRequest">GetKeyAccessServerByIdentifierRequest</a></td>
+                <td><a href="#policy.kasregistry.GetKeyAccessServerByIdentifierResponse">GetKeyAccessServerByIdentifierResponse</a></td>
+                <td><p></p></td>
+              </tr>
+            
+              <tr>
                 <td>CreateKeyAccessServer</td>
                 <td><a href="#policy.kasregistry.CreateKeyAccessServerRequest">CreateKeyAccessServerRequest</a></td>
                 <td><a href="#policy.kasregistry.CreateKeyAccessServerResponse">CreateKeyAccessServerResponse</a></td>
@@ -4968,6 +5045,16 @@ Attribute &lt;&gt; Key Access Server RPCs
                 <td>GetKeyAccessServer</td>
                 <td>GET</td>
                 <td>/key-access-servers/{id}</td>
+                <td></td>
+              </tr>
+              
+            
+              
+              
+              <tr>
+                <td>GetKeyAccessServerByIdentifier</td>
+                <td>GET</td>
+                <td>/key-access-servers/identifier/{identifier}</td>
                 <td></td>
               </tr>
               

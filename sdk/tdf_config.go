@@ -30,6 +30,8 @@ const (
 type KASInfo struct {
 	// URL of the KAS server``
 	URL string
+	// URN of the KAS identifier
+	URN string
 	// Public key can be empty. If it is empty, the public key will be fetched from the KAS server.
 	PublicKey string
 	// Key identifier associated with the given key, if present.
