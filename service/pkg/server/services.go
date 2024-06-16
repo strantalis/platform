@@ -11,7 +11,6 @@ import (
 	"github.com/opentdf/platform/service/health"
 	"github.com/opentdf/platform/service/internal/config"
 	"github.com/opentdf/platform/service/internal/logger"
-	"github.com/opentdf/platform/service/internal/opa"
 	"github.com/opentdf/platform/service/internal/server"
 	"github.com/opentdf/platform/service/kas"
 	"github.com/opentdf/platform/service/pkg/db"
@@ -39,7 +38,7 @@ func registerServices() error {
 	return nil
 }
 
-func startServices(ctx context.Context, cfg config.Config, otdf *server.OpenTDFServer, eng *opa.Engine, client *sdk.SDK, logger *logger.Logger) (func(), []serviceregistry.Service, error) {
+func startServices(ctx context.Context, cfg config.Config, otdf *server.OpenTDFServer, client *sdk.SDK, logger *logger.Logger) (func(), []serviceregistry.Service, error) {
 	// CloseServices is a function that will close all registered services
 	closeServices := func() {
 		logger.Info("stopping services")
@@ -71,7 +70,7 @@ func startServices(ctx context.Context, cfg config.Config, otdf *server.OpenTDFS
 		var d *db.Client
 
 		for _, r := range registers {
-			s, err := startService(ctx, cfg, r, otdf, eng, client, d, logger)
+			s, err := startService(ctx, cfg, r, otdf, client, d, logger)
 			if err != nil {
 				return closeServices, services, err
 			}
@@ -82,7 +81,7 @@ func startServices(ctx context.Context, cfg config.Config, otdf *server.OpenTDFS
 	return closeServices, services, nil
 }
 
-func startService(ctx context.Context, cfg config.Config, s serviceregistry.Service, otdf *server.OpenTDFServer, eng *opa.Engine, client *sdk.SDK, d *db.Client, logger *logger.Logger) (serviceregistry.Service, error) {
+func startService(ctx context.Context, cfg config.Config, s serviceregistry.Service, otdf *server.OpenTDFServer, client *sdk.SDK, d *db.Client, logger *logger.Logger) (serviceregistry.Service, error) {
 	// Create the database client if required
 	if s.DB.Required && d == nil {
 		var err error
@@ -130,7 +129,6 @@ func startService(ctx context.Context, cfg config.Config, s serviceregistry.Serv
 		Config:                 cfg.Services[s.Namespace],
 		OTDF:                   otdf,
 		DBClient:               d,
-		Engine:                 eng,
 		SDK:                    client,
 		WellKnownConfig:        wellknown.RegisterConfiguration,
 		RegisterReadinessCheck: health.RegisterReadinessCheck,

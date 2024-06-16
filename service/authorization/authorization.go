@@ -5,23 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strconv"
 	"strings"
-	"time"
 
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
-	"github.com/open-policy-agent/opa/metrics"
-	"github.com/open-policy-agent/opa/profiler"
-	opaSdk "github.com/open-policy-agent/opa/sdk"
 	"github.com/opentdf/platform/protocol/go/authorization"
 	"github.com/opentdf/platform/protocol/go/entityresolution"
 	"github.com/opentdf/platform/protocol/go/policy"
 	attr "github.com/opentdf/platform/protocol/go/policy/attributes"
 	otdf "github.com/opentdf/platform/sdk"
 	"github.com/opentdf/platform/service/internal/access"
-	"github.com/opentdf/platform/service/internal/entitlements"
 	"github.com/opentdf/platform/service/internal/logger"
-	"github.com/opentdf/platform/service/internal/opa"
+	"github.com/opentdf/platform/service/internal/subjectmappingbuiltin"
 	"github.com/opentdf/platform/service/pkg/db"
 	"github.com/opentdf/platform/service/pkg/serviceregistry"
 	"golang.org/x/oauth2"
@@ -30,7 +24,6 @@ import (
 
 type AuthorizationService struct { //nolint:revive // AuthorizationService is a valid name for this struct
 	authorization.UnimplementedAuthorizationServiceServer
-	eng         *opa.Engine
 	sdk         *otdf.SDK
 	ersURL      string
 	logger      *logger.Logger
@@ -49,7 +42,7 @@ func NewRegistration() serviceregistry.Registration {
 			var clientID = "tdf-authorization-svc"
 			var clientSecret = "secret"
 			var tokenEndpoint = "http://localhost:8888/auth/realms/opentdf/protocol/openid-connect/token" //nolint:gosec // default token endpoint
-			as := &AuthorizationService{eng: srp.Engine, sdk: srp.SDK, logger: srp.Logger}
+			as := &AuthorizationService{sdk: srp.SDK, logger: srp.Logger}
 			if err := srp.RegisterReadinessCheck("authorization", as.IsReady); err != nil {
 				slog.Error("failed to register authorization readiness check", slog.String("error", err.Error()))
 			}
@@ -318,69 +311,24 @@ func (as *AuthorizationService) GetEntitlements(ctx context.Context, req *author
 		Entitlements: make([]*authorization.EntityEntitlements, len(req.GetEntities())),
 	}
 	for i, entity := range req.GetEntities() {
-		// TODO: change this and the opa to take a bulk request and not have to call opa for each entity
-		// get the client auth token
-		authToken, err := (*as.tokenSource).Token()
-		if err != nil {
-			slog.Error("failed to get client auth token in GetEntitlements", slog.String("error", err.Error()))
-			return nil, fmt.Errorf("failed to get client auth token in GetEntitlements: %w", err)
-		}
-		// OPA
-		in, err := entitlements.OpaInput(entity, subjectMappings, as.ersURL, authToken.AccessToken)
-		if err != nil {
-			slog.Error("failed to build OPA input", slog.Any("entity", entity), slog.String("error", err.Error()))
-			slog.Debug("authToken", "authToken", authToken) // only log token in debug mode
-			return nil, fmt.Errorf("failed to build OPA input in GetEntitlements: %w", err)
-		}
-		as.logger.DebugContext(ctx, "entitlements", "entity_id", entity.GetId(), "input", fmt.Sprintf("%+v", in))
-		// uncomment for debugging
-		// if slog.Default().Enabled(ctx, slog.LevelDebug) {
-		//	_ = json.NewEncoder(os.Stdout).Encode(in)
-		// }
-		options := opaSdk.DecisionOptions{
-			Now:                 time.Now(),
-			Path:                "opentdf/entitlements/attributes", // change to /resolve_entities to get output of idp_plugin
-			Input:               in,
-			NDBCache:            nil,
-			StrictBuiltinErrors: true,
-			Tracer:              nil,
-			Metrics:             metrics.New(),
-			Profiler:            profiler.New(),
-			Instrument:          true,
-			DecisionID:          fmt.Sprintf("%-v", req.String()),
-		}
-		decision, err := as.eng.Decision(ctx, options)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get decision from OPA Engine in GetEntitlements: %w", err)
-		}
-		// uncomment for debugging
-		// if slog.Default().Enabled(ctx, slog.LevelDebug) {
-		//	_ = json.NewEncoder(os.Stdout).Encode(decision.Result)
-		// }
 
-		// if the output is a string, it is an error
-		resultError, ok := decision.Result.(string)
-		if ok {
-			as.logger.DebugContext(ctx, "not ok", "entity_id", entity.GetId(), "decision.Result", fmt.Sprintf("%+v", resultError))
-			return nil, errors.New(resultError)
-		}
-		results, ok := decision.Result.([]interface{})
-		if !ok {
-			as.logger.DebugContext(ctx, "not ok", "entity_id", entity.GetId(), "decision.Result", fmt.Sprintf("%+v", decision.Result))
+		resolvedEntity, err := as.sdk.EntityResoution.ResolveEntities(ctx, &entityresolution.ResolveEntitiesRequest{
+			Entities: []*authorization.Entity{entity},
+		})
+		if err != nil {
 			return nil, err
 		}
-		as.logger.DebugContext(ctx, "opa results", "entity_id", entity.GetId(), "results", fmt.Sprintf("%+v", results))
-		saa := make([]string, len(results))
-		for k, v := range results {
-			str, okk := v.(string)
-			if !okk {
-				as.logger.DebugContext(ctx, "not ok", slog.String("entity_id", entity.GetId()), slog.String(strconv.Itoa(k), fmt.Sprintf("%+v", v)))
-			}
-			saa[k] = str
+
+		entitlements, err := subjectmappingbuiltin.EvaluateSubjectMappings(subjectMappings, resolvedEntity.GetEntityRepresentations())
+		if err != nil {
+			return nil, err
 		}
+
+		as.logger.DebugContext(ctx, "entitlements", slog.String("entity_id", entity.GetId()), slog.Any("entitlements", entitlements))
+
 		rsp.Entitlements[i] = &authorization.EntityEntitlements{
 			EntityId:           entity.GetId(),
-			AttributeValueFqns: saa,
+			AttributeValueFqns: entitlements,
 		}
 	}
 	as.logger.DebugContext(ctx, "opa", "rsp", fmt.Sprintf("%+v", rsp))
