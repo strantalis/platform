@@ -33,6 +33,8 @@ import (
 	"golang.org/x/oauth2/clientcredentials"
 )
 
+const EntityIDPrefix string = "entity_idx_"
+
 type AuthorizationService struct { //nolint:revive // AuthorizationService is a valid name for this struct
 	authorization.UnimplementedAuthorizationServiceServer
 	sdk         *otdf.SDK
@@ -161,29 +163,6 @@ func (as AuthorizationService) IsReady(ctx context.Context) error {
 	return nil
 }
 
-// abstracted into variable for mocking in tests
-var retrieveAttributeDefinitions = func(ctx context.Context, ra *authorization.ResourceAttribute, sdk *otdf.SDK) (map[string]*attr.GetAttributeValuesByFqnsResponse_AttributeAndValue, error) {
-	attrFqns := ra.GetAttributeValueFqns()
-	if len(attrFqns) == 0 {
-		return make(map[string]*attr.GetAttributeValuesByFqnsResponse_AttributeAndValue), nil
-	}
-	resp, err := sdk.Attributes.GetAttributeValuesByFqns(ctx, &attr.GetAttributeValuesByFqnsRequest{
-		WithValue: &policy.AttributeValueSelector{
-			WithSubjectMaps: false,
-		},
-		Fqns: attrFqns,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return resp.GetFqnAttributeValues(), nil
-}
-
-// abstracted into variable for mocking in tests
-var retrieveEntitlements = func(ctx context.Context, req *authorization.GetEntitlementsRequest, as *AuthorizationService) (*authorization.GetEntitlementsResponse, error) {
-	return as.GetEntitlements(ctx, req)
-}
-
 func (as *AuthorizationService) GetDecisionsByToken(ctx context.Context, req *authorization.GetDecisionsByTokenRequest) (*authorization.GetDecisionsByTokenResponse, error) {
 	var decisionsRequests = []*authorization.DecisionRequest{}
 	// for each token decision request
@@ -295,7 +274,7 @@ func (as *AuthorizationService) GetDecisions(ctx context.Context, req *authoriza
 				if len(entities) == 0 || len(allPertinentFqnsRA.GetAttributeValueFqns()) == 0 {
 					as.logger.WarnContext(ctx, "Empty entity list and/or entity data attribute list")
 				} else {
-					ecEntitlements, err := retrieveEntitlements(ctx, &req, as)
+					ecEntitlements, err := as.GetEntitlements(ctx, &req)
 					if err != nil {
 						// TODO: should all decisions in a request fail if one entity entitlement lookup fails?
 						return nil, db.StatusifyError(err, db.ErrTextGetRetrievalFailed, slog.String("extra", "getEntitlements request failed"))
@@ -422,63 +401,82 @@ func (as *AuthorizationService) GetEntitlements(ctx context.Context, req *author
 	rsp := &authorization.GetEntitlementsResponse{
 		Entitlements: make([]*authorization.EntityEntitlements, len(req.GetEntities())),
 	}
+
+	// call ERS on all entities
+	ersResp, err := as.sdk.EntityResoution.ResolveEntities(ctx, &entityresolution.ResolveEntitiesRequest{Entities: req.GetEntities()})
+	if err != nil {
+		as.logger.ErrorContext(ctx, "error calling ERS to resolve entities", "entities", req.GetEntities())
+		return nil, err
+	}
+
+	// call rego on all entities
+	in, err := entitlements.OpaInput(subjectMappings, ersResp)
+	if err != nil {
+		as.logger.ErrorContext(ctx, "failed to build rego input", slog.String("error", err.Error()))
+		return nil, status.Error(codes.Internal, "failed to build rego input")
+	}
+	as.logger.DebugContext(ctx, "entitlements", "input", fmt.Sprintf("%+v", in))
+
+	results, err := as.eval.Eval(ctx,
+		rego.EvalInput(in),
+	)
+	if err != nil {
+		return nil, status.Error(codes.Internal, "failed to evaluate entitlements policy")
+	}
+	// If we get no results and no error then we assume that the entity is not entitled to anything
+	if len(results) == 0 {
+		as.logger.DebugContext(ctx, "no entitlement results")
+		return rsp, nil
+	}
+
+	// I am not sure how we would end up with multiple results but lets return an empty entitlement set for now
+	if len(results) > 1 {
+		as.logger.WarnContext(ctx, "multiple entitlement results", slog.String("results", fmt.Sprintf("%+v", results)))
+		return rsp, nil
+	}
+
+	// If we get no expressions then we assume that the entity is not entitled to anything
+	if len(results[0].Expressions) == 0 {
+		as.logger.WarnContext(ctx, "no entitlement expressions", slog.String("results", fmt.Sprintf("%+v", results)))
+		return rsp, nil
+	}
+
+	resultsEntitlements, entitlementsMapOk := results[0].Expressions[0].Value.(map[string]interface{})
+	if !entitlementsMapOk {
+		as.logger.ErrorContext(ctx, "entitlements is not a map[string]interface", slog.String("value", fmt.Sprintf("%+v", resultsEntitlements)))
+		return rsp, nil
+	}
+	as.logger.DebugContext(ctx, "opa results", "results", fmt.Sprintf("%+v", results))
+
 	for idx, entity := range req.GetEntities() {
-		// TODO: change this and the opa to take a bulk request and not have to call opa for each entity
-		// get the client auth token
-		authToken, err := (*as.tokenSource).Token()
-		if err != nil {
-			as.logger.ErrorContext(ctx, "failed to get client auth token in GetEntitlements", slog.String("error", err.Error()))
-			return nil, status.Error(codes.Internal, "failed to get client auth token in GetEntitlements")
+		// Ensure the entity has an ID
+		entityID := entity.GetId()
+		if entityID == "" {
+			entityID = EntityIDPrefix + fmt.Sprint(idx)
 		}
-
-		in, err := entitlements.OpaInput(entity, subjectMappings, as.config.ERSURL, authToken.AccessToken)
-		if err != nil {
-			as.logger.ErrorContext(ctx, "failed to build rego input", slog.Any("entity", entity), slog.String("error", err.Error()))
-			return nil, status.Error(codes.Internal, "failed to build rego input")
-		}
-		as.logger.DebugContext(ctx, "entitlements", "entity_id", entity.GetId(), "input", fmt.Sprintf("%+v", in))
-
-		results, err := as.eval.Eval(ctx,
-			rego.EvalInput(in),
-		)
-		if err != nil {
-			return nil, status.Error(codes.Internal, "failed to evaluate entitlements policy")
-		}
-
-		// If we get no results and no error then we assume that the entity is not entitled to anything
-		if len(results) == 0 {
-			as.logger.DebugContext(ctx, "no entitlement results", slog.String("entity_id", entity.GetId()))
-			return rsp, nil
-		}
-
-		// I am not sure how we would end up with multiple results but lets return an empty entitlement set for now
-		if len(results) > 1 {
-			as.logger.WarnContext(ctx, "multiple entitlement results", slog.String("entity_id", entity.GetId()), slog.String("results", fmt.Sprintf("%+v", results)))
-			return rsp, nil
-		}
-
-		// If we get no expressions then we assume that the entity is not entitled to anything
-		if len(results[0].Expressions) == 0 {
-			as.logger.WarnContext(ctx, "no entitlement expressions", slog.String("entity_id", entity.GetId()), slog.String("results", fmt.Sprintf("%+v", results)))
-			return rsp, nil
-		}
-
 		// Check to maksure if the value is a list. Good validation if someone customizes the rego policy
-		resultsEntitlements, valueListOk := results[0].Expressions[0].Value.([]interface{})
+		entityEntitlements, valueListOk := resultsEntitlements[entityID].([]interface{})
 		if !valueListOk {
-			as.logger.ErrorContext(ctx, "entitlements is not an array", slog.String("entity_id", entity.GetId()), slog.String("value", fmt.Sprintf("%+v", resultsEntitlements...)))
+			as.logger.ErrorContext(ctx, "entitlements is not a map[string]interface", slog.String("value", fmt.Sprintf("%+v", resultsEntitlements)))
 			return rsp, nil
 		}
+
+		// map for attributes for optional comprehensive
+		attributesMap := make(map[string]*policy.Attribute)
 		// Build array with length of results
-		var entitlements = make([]string, len(resultsEntitlements))
+		var entitlements = make([]string, len(entityEntitlements))
 
 		// Build entitlements list
-		for valueIDX, value := range resultsEntitlements {
+		for valueIDX, value := range entityEntitlements {
 			entitlement, valueOK := value.(string)
 			// If value is not okay skip adding to entitlements
 			if !valueOK {
 				as.logger.WarnContext(ctx, "issue with adding entitlement", slog.String("entity_id", entity.GetId()), slog.String("entitlement", entitlement))
 				continue
+			}
+			// if comprehensive and a hierarchy attribute is entitled then add the lower entitlements
+			if req.GetWithComprehensiveHierarchy() {
+				entitlements = getComprehensiveHierarchy(attributesMap, avf, entitlement, as, entitlements)
 			}
 			// Add entitlement to entitlements array
 			entitlements[valueIDX] = entitlement
@@ -491,6 +489,56 @@ func (as *AuthorizationService) GetEntitlements(ctx context.Context, req *author
 	}
 
 	return rsp, nil
+}
+
+func retrieveAttributeDefinitions(ctx context.Context, ra *authorization.ResourceAttribute, sdk *otdf.SDK) (map[string]*attr.GetAttributeValuesByFqnsResponse_AttributeAndValue, error) {
+	attrFqns := ra.GetAttributeValueFqns()
+	if len(attrFqns) == 0 {
+		return make(map[string]*attr.GetAttributeValuesByFqnsResponse_AttributeAndValue), nil
+	}
+	resp, err := sdk.Attributes.GetAttributeValuesByFqns(ctx, &attr.GetAttributeValuesByFqnsRequest{
+		WithValue: &policy.AttributeValueSelector{
+			WithSubjectMaps: false,
+		},
+		Fqns: attrFqns,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return resp.GetFqnAttributeValues(), nil
+}
+
+func getComprehensiveHierarchy(attributesMap map[string]*policy.Attribute, avf *attr.GetAttributeValuesByFqnsResponse, entitlement string, as *AuthorizationService, entitlements []string) []string {
+	// load attributesMap
+	if len(attributesMap) == 0 {
+		// Go through all attribute definitions
+		attrDefs := avf.GetFqnAttributeValues()
+		for _, attrDef := range attrDefs {
+			for _, attrVal := range attrDef.GetAttribute().GetValues() {
+				attributesMap[attrVal.GetFqn()] = attrDef.GetAttribute()
+			}
+		}
+	}
+	attrDef := attributesMap[entitlement]
+	if attrDef == nil {
+		as.logger.Warn("no attribute definition found for entity", "fqn", entitlement)
+		return entitlements
+	}
+	if attrDef.GetRule() == policy.AttributeRuleTypeEnum_ATTRIBUTE_RULE_TYPE_ENUM_HIERARCHY {
+		// add the following fqn in the hierarchy
+		isFollowing := false
+		for _, followingAttrVal := range attrDef.GetValues() {
+			if isFollowing {
+				entitlements = append(entitlements, followingAttrVal.GetFqn())
+			} else {
+				// if fqn match, then rest are added
+				// order is determined by creation order
+				// creation order is guaranteed unless unsafe operations used
+				isFollowing = followingAttrVal.GetFqn() == entitlement
+			}
+		}
+	}
+	return entitlements
 }
 
 // Build an fqn from a namespace, attribute name, and value

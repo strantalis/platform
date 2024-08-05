@@ -4,6 +4,13 @@
 # Notably, tests both 'ztdf' and 'nano' formats.
 
 @test "examples: roundtrip Z-TDF" {
+  # TODO: add subject mapping here to remove reliance on `provision fixtures`
+  echo "[INFO] configure attribute with grant for local kas"
+  go run ./examples --creds opentdf:secret kas add --kas http://localhost:8080 --public-key "$(<${BATS_TEST_DIRNAME}/../kas-cert.pem)"
+  go run ./examples --creds opentdf:secret attributes unassign -a https://example.com/attr/attr1 -v value1
+  go run ./examples --creds opentdf:secret attributes unassign -a https://example.com/attr/attr1
+  go run ./examples --creds opentdf:secret attributes assign -a https://example.com/attr/attr1 -v value1 -k http://localhost:8080
+
   echo "[INFO] create a tdf3 format file"
   run go run ./examples encrypt "Hello Zero Trust"
   echo "[INFO] echoing output; if successful, this is just the manifest"
@@ -34,8 +41,8 @@
   [ $(grpcurl -plaintext "localhost:8080" "kas.AccessService/PublicKey" | jq -e -r .kid) = r1 ]
 
   echo "[INFO] encrypting samples"
-  go run ./examples encrypt -o sensitive-with-no-kid.txt.tdf --no-kid-in-kao "Hello Legacy"
-  go run ./examples encrypt -o sensitive-with-kid.txt.tdf "Hello with Key Identifier"
+  go run ./examples encrypt --autoconfigure=false -o sensitive-with-no-kid.txt.tdf --no-kid-in-kao "Hello Legacy"
+  go run ./examples encrypt --autoconfigure=false -o sensitive-with-kid.txt.tdf "Hello with Key Identifier"
 
   echo "[INFO] decrypting..."
   go run ./examples decrypt sensitive-with-no-kid.txt.tdf | grep "Hello Legacy"
@@ -59,8 +66,8 @@
   [ $(grpcurl -plaintext "localhost:8080" "kas.AccessService/PublicKey" | jq -e -r .kid) = r1 ]
 
   echo "[INFO] encrypting samples"
-  go run ./examples encrypt -o sensitive-with-no-kid.txt.tdf --no-kid-in-kao "Hello Legacy"
-  go run ./examples encrypt -o sensitive-with-kid.txt.tdf "Hello with Key Identifier"
+  go run ./examples encrypt --autoconfigure=false -o sensitive-with-no-kid.txt.tdf --no-kid-in-kao "Hello Legacy"
+  go run ./examples encrypt --autoconfigure=false -o sensitive-with-kid.txt.tdf "Hello with Key Identifier"
 
   echo "[INFO] decrypting..."
   go run ./examples decrypt sensitive-with-no-kid.txt.tdf | grep "Hello Legacy"
