@@ -11,4 +11,8 @@ plugins:
   - plugin: doc # invokes protoc-gen-doc: https://github.com/pseudomuto/protoc-gen-doc
     out: docs/grpc
     strategy: all
-  
+    opt: json,proto.json
+  - plugin: doc # invokes protoc-gen-doc: https://github.com/pseudomuto/protoc-gen-doc
+    out: docs/grpc
+    strategy: all
+    opt: html,index.html
