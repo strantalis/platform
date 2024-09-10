@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 
+	"connectrpc.com/connect"
+	"connectrpc.com/grpcreflect"
 	"github.com/opentdf/platform/sdk"
 	"github.com/opentdf/platform/service/authorization"
 	"github.com/opentdf/platform/service/entityresolution"
@@ -103,6 +105,8 @@ func registerCoreServices(reg serviceregistry.Registry, mode []string) ([]string
 // and a database client if required. It registers the services with the gRPC server,
 // in-process gRPC server, and gRPC gateway. Finally, it logs the status of each service.
 func startServices(ctx context.Context, cfg config.Config, otdf *server.OpenTDFServer, client *sdk.SDK, logger *logger.Logger, reg serviceregistry.Registry) error {
+	serviceNames := []string{}
+
 	// Iterate through the registered namespaces
 	for ns, namespace := range reg {
 		// modeEnabled checks if the mode is enabled based on the configuration and namespace mode.
@@ -149,17 +153,18 @@ func startServices(ctx context.Context, cfg config.Config, otdf *server.OpenTDFS
 				return err
 			}
 			// Register the service with the gRPC server
-			if err := svc.RegisterGRPCServer(otdf.GRPCServer); err != nil {
-				return err
-			}
+			// if err := svc.RegisterGRPCServer(otdf.GRPCServer); err != nil {
+			// 	return err
+			// }
 
 			// Register the service with in process gRPC server
-			if err := svc.RegisterGRPCServer(otdf.GRPCInProcess.GetGrpcServer()); err != nil {
-				return err
-			}
+			// if err := svc.RegisterGRPCServer(otdf.GRPCInProcess.GetGrpcServer()); err != nil {
+			// 	return err
+			// }
 
 			// Register the service with the gRPC gateway
-			if err := svc.RegisterHTTPServer(ctx, otdf.Mux); err != nil { //nolint:staticcheck // This is deprecated for internal tracking
+			serviceNames = append(serviceNames, svc.ServiceDesc.ServiceName)
+			if err := svc.RegisterHTTPServer(ctx, otdf.ConnectMux, otdf.Mux); err != nil { //nolint:staticcheck // This is deprecated for internal tracking
 				logger.Error("failed to register service to grpc gateway", slog.String("namespace", ns), slog.String("error", err.Error()))
 				return err
 			}
@@ -175,6 +180,9 @@ func startServices(ctx context.Context, cfg config.Config, otdf *server.OpenTDFS
 			)
 		}
 	}
+	compress1KB := connect.WithCompressMinBytes(1024)
+	otdf.ConnectMux.Handle(grpcreflect.NewHandlerV1(grpcreflect.NewStaticReflector(serviceNames...), compress1KB))
+	otdf.ConnectMux.Handle(grpcreflect.NewHandlerV1Alpha(grpcreflect.NewStaticReflector(serviceNames...), compress1KB))
 
 	return nil
 }

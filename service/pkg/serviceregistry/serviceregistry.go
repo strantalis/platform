@@ -5,6 +5,7 @@ import (
 	"embed"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"slices"
 
 	"github.com/opentdf/platform/sdk"
@@ -47,8 +48,10 @@ type RegistrationParams struct {
 	// ready to serve requests. This function should be called in the RegisterFunc function.
 	RegisterReadinessCheck func(namespace string, check func(context.Context) error) error
 }
-type HandlerServer func(ctx context.Context, mux *runtime.ServeMux, server any) error
-type RegisterFunc func(RegistrationParams) (Impl any, HandlerServer HandlerServer)
+type (
+	HandlerServer func(ctx context.Context, connectRPC *http.ServeMux, mux *runtime.ServeMux, server any) error
+	RegisterFunc  func(RegistrationParams) (Impl any, HandlerServer HandlerServer)
+)
 
 // Registration is a struct that holds the information needed to register a service
 type Registration struct {
@@ -126,11 +129,11 @@ func (s *Service) RegisterGRPCServer(server *grpc.Server) error {
 // RegisterHTTPServer registers an HTTP server with the service.
 // It takes a context, a ServeMux, and an implementation function as parameters.
 // If the service did not register a handler, it returns an error.
-func (s *Service) RegisterHTTPServer(ctx context.Context, mux *runtime.ServeMux) error {
+func (s *Service) RegisterHTTPServer(ctx context.Context, connectRPC *http.ServeMux, mux *runtime.ServeMux) error {
 	if s.handleFunc == nil {
 		return fmt.Errorf("service did not register a handler")
 	}
-	return s.handleFunc(ctx, mux, s.impl)
+	return s.handleFunc(ctx, connectRPC, mux, s.impl)
 }
 
 // namespace represents a namespace in the service registry.

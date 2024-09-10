@@ -16,8 +16,12 @@ const (
 	ErrConfig = Error("invalid config")
 )
 
-type Provider struct {
+type ProviderGRPCGateway struct {
 	kaspb.AccessServiceServer
+	ConnectRPC Provider
+}
+
+type Provider struct {
 	URI            url.URL `json:"uri"`
 	SDK            *otdf.SDK
 	AttributeSvc   *url.URL

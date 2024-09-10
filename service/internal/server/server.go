@@ -9,14 +9,10 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
-	"net/netip"
 	"strings"
 	"time"
 
-	"github.com/bufbuild/protovalidate-go"
 	"github.com/go-chi/cors"
-	protovalidate_middleware "github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/protovalidate"
-	"github.com/grpc-ecosystem/go-grpc-middleware/v2/interceptors/realip"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	sdkAudit "github.com/opentdf/platform/sdk/audit"
 	"github.com/opentdf/platform/service/internal/auth"
@@ -27,10 +23,8 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
-	"google.golang.org/grpc/reflection"
 )
 
 const (
@@ -108,7 +102,7 @@ type OpenTDFServer struct {
 	AuthN          *auth.Authentication
 	Mux            *runtime.ServeMux
 	HTTPServer     *http.Server
-	GRPCServer     *grpc.Server
+	ConnectMux     *http.ServeMux
 	GRPCInProcess  *inProcessServer
 	CryptoProvider security.CryptoProvider
 
@@ -123,7 +117,7 @@ https://github.com/valyala/fasthttp/blob/master/fasthttputil/inmemory_listener.g
 */
 type inProcessServer struct {
 	ln  *fasthttputil.InmemoryListener
-	srv *grpc.Server
+	srv *http.Server
 
 	maxCallRecvMsgSize int
 	maxCallSendMsgSize int
@@ -153,32 +147,36 @@ func NewOpenTDFServer(config Config, logger *logger.Logger) (*OpenTDFServer, err
 	}
 
 	// Create grpc server and in process grpc server
-	grpcServer, err := newGrpcServer(config, authN, logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create grpc server: %w", err)
-	}
-	grpcIPCServer := &inProcessServer{
-		ln:                 fasthttputil.NewInmemoryListener(),
-		srv:                newGrpcInProcessServer(),
-		maxCallRecvMsgSize: config.GRPC.MaxCallRecvMsgSizeBytes,
-		maxCallSendMsgSize: config.GRPC.MaxCallSendMsgSizeBytes,
-	}
+	// grpcServer, err := newGrpcServer(config, authN, logger)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("failed to create grpc server: %w", err)
+	// }
 
 	// Create http server
+	connectMux := http.NewServeMux()
+
+	grpcIPCServer := &inProcessServer{
+		ln:  fasthttputil.NewInmemoryListener(),
+		srv: newGrpcInProcessServer(connectMux),
+		// maxCallRecvMsgSize: config.GRPC.MaxCallRecvMsgSizeBytes,
+		// maxCallSendMsgSize: config.GRPC.MaxCallSendMsgSizeBytes,
+	}
+
 	mux := runtime.NewServeMux(
 		runtime.WithHealthzEndpoint(healthpb.NewHealthClient(grpcIPCServer.Conn())),
 	)
-	httpServer, err := newHTTPServer(config, mux, authN, grpcServer, logger)
+	httpServer, err := newHTTPServer(config, connectMux, mux, authN, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create http server: %w", err)
 	}
 
 	o := OpenTDFServer{
-		AuthN:         authN,
-		Mux:           mux,
-		HTTPServer:    httpServer,
-		GRPCServer:    grpcServer,
+		AuthN:      authN,
+		Mux:        mux,
+		HTTPServer: httpServer,
+		// GRPCServer:    grpcServer,
 		GRPCInProcess: grpcIPCServer,
+		ConnectMux:    connectMux,
 		logger:        logger,
 	}
 
@@ -193,24 +191,26 @@ func NewOpenTDFServer(config Config, logger *logger.Logger) (*OpenTDFServer, err
 }
 
 // newHTTPServer creates a new http server with the given handler and grpc server
-func newHTTPServer(c Config, h http.Handler, a *auth.Authentication, g *grpc.Server, l *logger.Logger) (*http.Server, error) {
+func newHTTPServer(c Config, connectRPC *http.ServeMux, h http.Handler, a *auth.Authentication, l *logger.Logger) (*http.Server, error) {
 	var (
 		err                  error
 		tc                   *tls.Config
 		writeTimeoutOverride = writeTimeout
+		combinedHandler      http.Handler
 	)
-
+	// Registry grpc-gateway to connect RPC
+	connectRPC.Handle("/", h)
 	// Add authN interceptor
 	// This is needed because we are leveraging RegisterXServiceHandlerServer instead of RegisterXServiceHandlerFromEndpoint
 	if c.Auth.Enabled {
-		h = a.MuxHandler(h)
+		combinedHandler = a.MuxHandler(connectRPC)
 	} else {
 		l.Error("disabling authentication. this is deprecated and will be removed. if you are using an IdP without DPoP set `enforceDPoP = false`")
 	}
 
 	// CORS
 	if c.CORS.Enabled {
-		h = cors.New(cors.Options{
+		combinedHandler = cors.New(cors.Options{
 			AllowOriginFunc: func(_ *http.Request, origin string) bool {
 				for _, allowedOrigin := range c.CORS.AllowedOrigins {
 					if allowedOrigin == "*" {
@@ -227,21 +227,21 @@ func newHTTPServer(c Config, h http.Handler, a *auth.Authentication, g *grpc.Ser
 			ExposedHeaders:   c.CORS.ExposedHeaders,
 			AllowCredentials: c.CORS.AllowCredentials,
 			MaxAge:           c.CORS.MaxAge,
-		}).Handler(h)
+		}).Handler(combinedHandler)
 	}
 
 	// Enable pprof
 	if c.EnablePprof {
-		h = pprofHandler(h)
+		combinedHandler = pprofHandler(combinedHandler)
 		// Need to extend write timeout to collect pprof data.
 		writeTimeoutOverride = 30 * time.Second //nolint:mnd // easier to read that we are overriding the default
 	}
 
 	// Add grpc handler
-	h2 := httpGrpcHandlerFunc(h, g, l)
+	// h2 := httpGrpcHandlerFunc(h, g, l)
 
 	if !c.TLS.Enabled {
-		h2 = h2c.NewHandler(h2, &http2.Server{})
+		combinedHandler = h2c.NewHandler(combinedHandler, &http2.Server{})
 	} else {
 		tc, err = loadTLSConfig(c.TLS)
 		if err != nil {
@@ -253,7 +253,7 @@ func newHTTPServer(c Config, h http.Handler, a *auth.Authentication, g *grpc.Ser
 		Addr:         fmt.Sprintf("%s:%d", c.Host, c.Port),
 		WriteTimeout: writeTimeoutOverride,
 		ReadTimeout:  readTimeout,
-		Handler:      h2,
+		Handler:      combinedHandler,
 		TLSConfig:    tc,
 	}, nil
 }
@@ -281,18 +281,18 @@ func pprofHandler(h http.Handler) http.Handler {
 }
 
 // httpGrpcHandlerFunc returns a http.Handler that delegates to the grpc server if the request is a grpc request
-func httpGrpcHandlerFunc(h http.Handler, g *grpc.Server, l *logger.Logger) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		l.TraceContext(r.Context(), "grpc handler func", slog.Int("proto_major", r.ProtoMajor), slog.String("content_type", r.Header.Get("Content-Type")))
-		if r.ProtoMajor == 2 && strings.Contains(r.Header.Get("Content-Type"), "application/grpc") {
-			g.ServeHTTP(w, r)
-		} else {
-			h.ServeHTTP(w, r)
-		}
-	})
-}
+// func httpGrpcHandlerFunc(h http.Handler, g *grpc.Server, l *logger.Logger) http.Handler {
+// 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+// 		l.TraceContext(r.Context(), "grpc handler func", slog.Int("proto_major", r.ProtoMajor), slog.String("content_type", r.Header.Get("Content-Type")))
+// 		if r.ProtoMajor == 2 && strings.Contains(r.Header.Get("Content-Type"), "application/grpc") {
+// 			g.ServeHTTP(w, r)
+// 		} else {
+// 			h.ServeHTTP(w, r)
+// 		}
+// 	})
+// }
 
-func newGrpcInProcessServer() *grpc.Server {
+func newGrpcInProcessServer(mux *http.ServeMux) *http.Server {
 	var interceptors []grpc.UnaryServerInterceptor
 	var serverOptions []grpc.ServerOption
 
@@ -307,62 +307,64 @@ func newGrpcInProcessServer() *grpc.Server {
 
 	// Add interceptors to server options
 	serverOptions = append(serverOptions, grpc.ChainUnaryInterceptor(interceptors...))
-	return grpc.NewServer(serverOptions...)
+	return &http.Server{
+		Handler: h2c.NewHandler(mux, &http2.Server{}),
+	}
 }
 
 // newGrpcServer creates a new grpc server with the given config and authN interceptor
-func newGrpcServer(c Config, a *auth.Authentication, logger *logger.Logger) (*grpc.Server, error) {
-	var i []grpc.UnaryServerInterceptor
-	var o []grpc.ServerOption
+// func newGrpcServer(c Config, a *auth.Authentication, logger *logger.Logger) (*grpc.Server, error) {
+// 	var i []grpc.UnaryServerInterceptor
+// 	var o []grpc.ServerOption
 
-	// Enable proto validation
-	validator, err := protovalidate.New()
-	if err != nil {
-		logger.Warn("failed to create proto validator", slog.String("error", err.Error()))
-	}
+// 	// Enable proto validation
+// 	validator, err := protovalidate.New()
+// 	if err != nil {
+// 		logger.Warn("failed to create proto validator", slog.String("error", err.Error()))
+// 	}
 
-	// Add Audit Unary Server Interceptor
-	i = append(i, audit.ContextServerInterceptor)
+// 	// Add Audit Unary Server Interceptor
+// 	i = append(i, audit.ContextServerInterceptor)
 
-	if c.Auth.Enabled {
-		i = append(i, a.UnaryServerInterceptor)
-	} else {
-		logger.Error("disabling authentication. this is deprecated and will be removed. if you are using an IdP without DPoP you can set `enforceDpop = false`")
-	}
+// 	if c.Auth.Enabled {
+// 		i = append(i, a.UnaryServerInterceptor)
+// 	} else {
+// 		logger.Error("disabling authentication. this is deprecated and will be removed. if you are using an IdP without DPoP you can set `enforceDpop = false`")
+// 	}
 
-	// Add tls creds if tls is not nil
-	if c.TLS.Enabled {
-		c, err := loadTLSConfig(c.TLS)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load tls config: %w", err)
-		}
-		o = append(o, grpc.Creds(credentials.NewTLS(c)))
-	}
+// 	// Add tls creds if tls is not nil
+// 	if c.TLS.Enabled {
+// 		c, err := loadTLSConfig(c.TLS)
+// 		if err != nil {
+// 			return nil, fmt.Errorf("failed to load tls config: %w", err)
+// 		}
+// 		o = append(o, grpc.Creds(credentials.NewTLS(c)))
+// 	}
 
-	// Add proto validation interceptor
-	i = append(i, protovalidate_middleware.UnaryServerInterceptor(validator))
+// 	// Add proto validation interceptor
+// 	i = append(i, protovalidate_middleware.UnaryServerInterceptor(validator))
 
-	o = append(o, grpc.ChainUnaryInterceptor(
-		i...,
-	))
+// 	o = append(o, grpc.ChainUnaryInterceptor(
+// 		i...,
+// 	))
 
-	// Chain relaip interceptor
-	trustedPeers := []netip.Prefix{} // TODO: add this as a config option?
-	headers := []string{realip.XForwardedFor, realip.XRealIp}
+// 	// Chain relaip interceptor
+// 	trustedPeers := []netip.Prefix{} // TODO: add this as a config option?
+// 	headers := []string{realip.XForwardedFor, realip.XRealIp}
 
-	o = append(o, grpc.ChainUnaryInterceptor(
-		realip.UnaryServerInterceptor(trustedPeers, headers),
-	))
+// 	o = append(o, grpc.ChainUnaryInterceptor(
+// 		realip.UnaryServerInterceptor(trustedPeers, headers),
+// 	))
 
-	s := grpc.NewServer(o...)
+// 	s := grpc.NewServer(o...)
 
-	// Enable grpc reflection
-	if c.GRPC.ReflectionEnabled {
-		reflection.Register(s)
-	}
+// 	// Enable grpc reflection
+// 	if c.GRPC.ReflectionEnabled {
+// 		reflection.Register(s)
+// 	}
 
-	return s, nil
-}
+// 	return s, nil
+// }
 
 func (s OpenTDFServer) Start() {
 	// // Start Http Server
@@ -381,12 +383,15 @@ func (s OpenTDFServer) Stop() {
 	}
 
 	s.logger.Info("shutting down in process grpc server")
-	s.GRPCInProcess.srv.GracefulStop()
+	if err := s.GRPCInProcess.srv.Shutdown(ctx); err != nil {
+		s.logger.Error("failed to shutdown in process http server", slog.String("error", err.Error()))
+		return
+	}
 
 	s.logger.Info("shutdown complete")
 }
 
-func (s inProcessServer) GetGrpcServer() *grpc.Server {
+func (s inProcessServer) GetGrpcServer() *http.Server {
 	return s.srv
 }
 

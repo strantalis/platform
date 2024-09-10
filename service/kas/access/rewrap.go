@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/lestrrat-go/jwx/v2/jwt"
@@ -190,6 +191,7 @@ func extractSRTBody(ctx context.Context, in *kaspb.RewrapRequest, logger logger.
 		return nil, err400("clientPublicKey unsupported type")
 	}
 }
+
 func extractPolicyBinding(policyBinding interface{}) (string, error) {
 	switch v := policyBinding.(type) {
 	case string:
@@ -203,6 +205,7 @@ func extractPolicyBinding(policyBinding interface{}) (string, error) {
 		return "", fmt.Errorf("unsupported policy binding type")
 	}
 }
+
 func verifyAndParsePolicy(ctx context.Context, requestBody *RequestBody, k []byte, logger logger.Logger) (*Policy, error) {
 	actualHMAC, err := generateHMACDigest(ctx, []byte(requestBody.Policy), k, logger)
 	if err != nil {
@@ -246,7 +249,7 @@ func verifyAndParsePolicy(ctx context.Context, requestBody *RequestBody, k []byt
 }
 
 func getEntityInfo(ctx context.Context, logger *logger.Logger) (*entityInfo, error) {
-	var info = new(entityInfo)
+	info := new(entityInfo)
 
 	token := auth.GetAccessTokenFromContext(ctx, logger)
 	if token == nil {
@@ -269,10 +272,18 @@ func getEntityInfo(ctx context.Context, logger *logger.Logger) (*entityInfo, err
 	return info, nil
 }
 
-func (p *Provider) Rewrap(ctx context.Context, in *kaspb.RewrapRequest) (*kaspb.RewrapResponse, error) {
+func (p ProviderGRPCGateway) Rewrap(ctx context.Context, in *kaspb.RewrapRequest) (*kaspb.RewrapResponse, error) {
+	rsp, err := p.ConnectRPC.Rewrap(ctx, &connect.Request[kaspb.RewrapRequest]{Msg: in})
+	if err != nil {
+		return nil, err
+	}
+	return rsp.Msg, nil
+}
+
+func (p *Provider) Rewrap(ctx context.Context, in *connect.Request[kaspb.RewrapRequest]) (*connect.Response[kaspb.RewrapResponse], error) {
 	p.Logger.DebugContext(ctx, "REWRAP")
 
-	body, err := extractSRTBody(ctx, in, *p.Logger)
+	body, err := extractSRTBody(ctx, in.Msg, *p.Logger)
 	if err != nil {
 		p.Logger.DebugContext(ctx, "unverifiable srt", "err", err)
 		return nil, err
@@ -295,13 +306,13 @@ func (p *Provider) Rewrap(ctx context.Context, in *kaspb.RewrapRequest) (*kaspb.
 			p.Logger.ErrorContext(ctx, "rewrap nano", "err", err)
 		}
 		p.Logger.DebugContext(ctx, "rewrap nano", "rsp", rsp)
-		return rsp, err
+		return &connect.Response[kaspb.RewrapResponse]{Msg: rsp}, err
 	}
 	rsp, err := p.tdf3Rewrap(ctx, body, entityInfo)
 	if err != nil {
 		p.Logger.ErrorContext(ctx, "rewrap tdf3", "err", err)
 	}
-	return rsp, err
+	return &connect.Response[kaspb.RewrapResponse]{Msg: rsp}, err
 }
 
 func (p *Provider) tdf3Rewrap(ctx context.Context, body *RequestBody, entity *entityInfo) (*kaspb.RewrapResponse, error) {
@@ -481,7 +492,6 @@ func (p *Provider) nanoTDFRewrap(ctx context.Context, body *RequestBody, entity 
 	}
 
 	privateKeyHandle, publicKeyHandle, err := p.CryptoProvider.GenerateEphemeralKasKeys()
-
 	if err != nil {
 		p.Logger.Audit.RewrapFailure(ctx, auditEventParams)
 		return nil, fmt.Errorf("failed to generate keypair: %w", err)

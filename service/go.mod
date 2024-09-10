@@ -3,6 +3,7 @@ module github.com/opentdf/platform/service
 go 1.22
 
 require (
+	connectrpc.com/connect v1.16.2
 	github.com/Masterminds/squirrel v1.5.4
 	github.com/Nerzal/gocloak/v13 v13.9.0
 	github.com/bmatcuk/doublestar v1.3.4
@@ -38,6 +39,8 @@ require (
 )
 
 require (
+	connectrpc.com/grpchealth v1.3.0 // indirect
+	connectrpc.com/grpcreflect v1.2.0 // indirect
 	github.com/Microsoft/hcsshim v0.12.0 // indirect
 	github.com/OneOfOne/xxhash v1.2.8 // indirect
 	github.com/agnivade/levenshtein v1.1.1 // indirect
