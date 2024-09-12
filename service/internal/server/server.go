@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"connectrpc.com/connect"
 	"github.com/go-chi/cors"
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	sdkAudit "github.com/opentdf/platform/sdk/audit"
@@ -102,11 +103,16 @@ type OpenTDFServer struct {
 	AuthN          *auth.Authentication
 	Mux            *runtime.ServeMux
 	HTTPServer     *http.Server
-	ConnectMux     *http.ServeMux
+	ConnectRPC     *ConnectRPC
 	GRPCInProcess  *inProcessServer
 	CryptoProvider security.CryptoProvider
 
 	logger *logger.Logger
+}
+
+type ConnectRPC struct {
+	ConnectMux   *http.ServeMux
+	Interceptors []connect.UnaryInterceptorFunc
 }
 
 /*
@@ -146,6 +152,10 @@ func NewOpenTDFServer(config Config, logger *logger.Logger) (*OpenTDFServer, err
 		logger.Warn("disabling authentication. this is deprecated and will be removed. if you are using an IdP without DPoP set `enforceDPoP = false`")
 	}
 
+	connectRPC := &ConnectRPC{}
+
+	connectRPC.Interceptors = append(connectRPC.Interceptors, authN.UnaryServerInterceptor())
+
 	// Create grpc server and in process grpc server
 	// grpcServer, err := newGrpcServer(config, authN, logger)
 	// if err != nil {
@@ -153,11 +163,11 @@ func NewOpenTDFServer(config Config, logger *logger.Logger) (*OpenTDFServer, err
 	// }
 
 	// Create http server
-	connectMux := http.NewServeMux()
+	connectRPC.ConnectMux = http.NewServeMux()
 
 	grpcIPCServer := &inProcessServer{
 		ln:  fasthttputil.NewInmemoryListener(),
-		srv: newGrpcInProcessServer(connectMux),
+		srv: newGrpcInProcessServer(connectRPC.ConnectMux),
 		// maxCallRecvMsgSize: config.GRPC.MaxCallRecvMsgSizeBytes,
 		// maxCallSendMsgSize: config.GRPC.MaxCallSendMsgSizeBytes,
 	}
@@ -165,7 +175,7 @@ func NewOpenTDFServer(config Config, logger *logger.Logger) (*OpenTDFServer, err
 	mux := runtime.NewServeMux(
 		runtime.WithHealthzEndpoint(healthpb.NewHealthClient(grpcIPCServer.Conn())),
 	)
-	httpServer, err := newHTTPServer(config, connectMux, mux, authN, logger)
+	httpServer, err := newHTTPServer(config, connectRPC.ConnectMux, mux, authN, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create http server: %w", err)
 	}
@@ -176,7 +186,7 @@ func NewOpenTDFServer(config Config, logger *logger.Logger) (*OpenTDFServer, err
 		HTTPServer: httpServer,
 		// GRPCServer:    grpcServer,
 		GRPCInProcess: grpcIPCServer,
-		ConnectMux:    connectMux,
+		ConnectRPC:    connectRPC,
 		logger:        logger,
 	}
 
@@ -198,15 +208,17 @@ func newHTTPServer(c Config, connectRPC *http.ServeMux, h http.Handler, a *auth.
 		writeTimeoutOverride = writeTimeout
 		combinedHandler      http.Handler
 	)
-	// Registry grpc-gateway to connect RPC
-	connectRPC.Handle("/", h)
+
 	// Add authN interceptor
 	// This is needed because we are leveraging RegisterXServiceHandlerServer instead of RegisterXServiceHandlerFromEndpoint
 	if c.Auth.Enabled {
-		combinedHandler = a.MuxHandler(connectRPC)
+		h = a.MuxHandler(h)
 	} else {
 		l.Error("disabling authentication. this is deprecated and will be removed. if you are using an IdP without DPoP set `enforceDPoP = false`")
 	}
+
+	// Registry grpc-gateway to connect RP
+	connectRPC.Handle("/", h)
 
 	// CORS
 	if c.CORS.Enabled {
@@ -227,7 +239,7 @@ func newHTTPServer(c Config, connectRPC *http.ServeMux, h http.Handler, a *auth.
 			ExposedHeaders:   c.CORS.ExposedHeaders,
 			AllowCredentials: c.CORS.AllowCredentials,
 			MaxAge:           c.CORS.MaxAge,
-		}).Handler(combinedHandler)
+		}).Handler(connectRPC)
 	}
 
 	// Enable pprof
