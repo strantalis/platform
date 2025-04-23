@@ -55,7 +55,15 @@ type ECEncryptor struct {
 	info []byte
 }
 
-func FromPublicPEM(publicKeyInPem string, salt, info []byte) (PublicKeyEncryptor, error) {
+func FromPublicPEM(publicKeyInPem string) (PublicKeyEncryptor, error) {
+	// TK Move salt and info out of library, into API option functions
+	digest := sha256.New()
+	digest.Write([]byte("TDF"))
+	salt := digest.Sum(nil)
+
+	return FromPublicPEMWithSalt(publicKeyInPem, salt, nil)
+}
+func FromPublicPEMWithSalt(publicKeyInPem string, salt, info []byte) (PublicKeyEncryptor, error) {
 	pub, err := getPublicPart(publicKeyInPem)
 	if err != nil {
 		return nil, err

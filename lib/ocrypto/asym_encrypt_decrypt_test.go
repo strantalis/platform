@@ -253,7 +253,7 @@ bW0CIQDT5QED+8mHFot9JXSx2q1c5mnRvl4yElK0fiHeatBdqw==
 	}
 
 	for _, test := range keypairs {
-		asymEncryptor, err := FromPublicPEM(test.publicKey, test.salt, test.info)
+		asymEncryptor, err := FromPublicPEMWithSalt(test.publicKey, test.salt, test.info)
 		if err != nil {
 			t.Fatalf("NewAsymEncryption - failed: %v", err)
 		}
@@ -264,7 +264,7 @@ bW0CIQDT5QED+8mHFot9JXSx2q1c5mnRvl4yElK0fiHeatBdqw==
 			t.Fatalf("AsymEncryption encrypt failed: %v", err)
 		}
 
-		asymDecryptor, err := FromPrivatePEM(test.privateKey, test.salt, test.info)
+		asymDecryptor, err := FromPrivatePEMWithSalt(test.privateKey, test.salt, test.info)
 		if err != nil {
 			t.Fatalf("NewAsymDecryption - failed: %v", err)
 		}
