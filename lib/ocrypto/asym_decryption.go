@@ -29,7 +29,7 @@ type PrivateKeyDecryptor interface {
 }
 
 // FromPrivatePEM creates and returns a new AsymDecryption.
-func FromPrivatePEM(privateKeyInPem string) (PrivateKeyDecryptor, error) {
+func FromPrivatePEM(privateKeyInPem string, salt, info []byte) (PrivateKeyDecryptor, error) {
 	block, _ := pem.Decode([]byte(privateKeyInPem))
 	if block == nil {
 		return AsymDecryption{}, errors.New("failed to parse PEM formatted private key")
@@ -59,9 +59,9 @@ func FromPrivatePEM(privateKeyInPem string) (PrivateKeyDecryptor, error) {
 		if err != nil {
 			return nil, fmt.Errorf("unable to create ECDH key: %w", err)
 		}
-		return NewECDecryptor(sk)
+		return NewECDecryptor(sk, salt, info)
 	case *ecdh.PrivateKey:
-		return NewECDecryptor(privateKey)
+		return NewECDecryptor(privateKey, salt, info)
 	case *rsa.PrivateKey:
 		return AsymDecryption{privateKey}, nil
 	default:
@@ -72,7 +72,7 @@ func FromPrivatePEM(privateKeyInPem string) (PrivateKeyDecryptor, error) {
 }
 
 func NewAsymDecryption(privateKeyInPem string) (AsymDecryption, error) {
-	d, err := FromPrivatePEM(privateKeyInPem)
+	d, err := FromPrivatePEM(privateKeyInPem, nil, nil)
 	if err != nil {
 		return AsymDecryption{}, err
 	}
@@ -106,13 +106,8 @@ type ECDecryptor struct {
 	info []byte
 }
 
-func NewECDecryptor(sk *ecdh.PrivateKey) (ECDecryptor, error) {
-	// TK Move salt and info out of library, into API option functions
-	digest := sha256.New()
-	digest.Write([]byte("TDF"))
-	salt := digest.Sum(nil)
-
-	return ECDecryptor{sk, salt, nil}, nil
+func NewECDecryptor(sk *ecdh.PrivateKey, salt, info []byte) (ECDecryptor, error) {
+	return ECDecryptor{sk, salt, info}, nil
 }
 
 func (e ECDecryptor) Decrypt(_ []byte) ([]byte, error) {

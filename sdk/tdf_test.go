@@ -1942,13 +1942,13 @@ func (f *FakeKas) getRewrapResponse(rewrapRequest string) *kaspb.RewrapResponse 
 				privateKey, err := ocrypto.ECPrivateKeyFromPem([]byte(kasPrivateKey))
 				f.s.Require().NoError(err, "failed to extract private key from PEM")
 
-				ed, err := ocrypto.NewECDecryptor(privateKey)
+				ed, err := ocrypto.NewECDecryptor(privateKey, tdfSalt(), nil)
 				f.s.Require().NoError(err, "failed to create EC decryptor")
 
 				symmetricKey, err := ed.DecryptWithEphemeralKey(wrappedKey, compressedKey)
 				f.s.Require().NoError(err, "failed to decrypt")
 
-				asymEncrypt, err := ocrypto.FromPublicPEM(bodyData.GetClientPublicKey())
+				asymEncrypt, err := ocrypto.FromPublicPEM(bodyData.GetClientPublicKey(), tdfSalt(), nil)
 				f.s.Require().NoError(err, "ocrypto.FromPublicPEM failed")
 
 				var sessionKey string

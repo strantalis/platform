@@ -428,6 +428,13 @@ func (s StandardCrypto) GenerateNanoTDFSessionKey(privateKey any, ephemeralPubli
 func (s StandardCrypto) Close() {
 }
 
+func TDFSalt() []byte {
+	digest := sha256.New()
+	digest.Write([]byte("TDF"))
+	salt := digest.Sum(nil)
+	return salt
+}
+
 func versionSalt() []byte {
 	digest := sha256.New()
 	digest.Write([]byte(kNanoTDFMagicStringAndVersion))
@@ -469,7 +476,7 @@ func (s *StandardCrypto) Decrypt(ctx context.Context, keyID KeyIdentifier, ciphe
 			key.sk = loaded
 		}
 
-		ed, err := ocrypto.NewECDecryptor(key.sk)
+		ed, err := ocrypto.NewECDecryptor(key.sk, TDFSalt(), nil)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create EC decryptor: %w", err)
 		}
