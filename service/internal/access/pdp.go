@@ -3,6 +3,7 @@ package access
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/opentdf/platform/protocol/go/policy"
@@ -30,27 +31,50 @@ func (pdp *Pdp) DetermineAccess(
 ) (map[string]*Decision, error) {
 	pdp.logger.DebugContext(ctx, "DetermineAccess")
 	// Group all the Data Attribute Values by their Definitions (that is, "<namespace>/attr/<attrname>").
-	// Definitions contain the rule logic for how to evaluate the data Attribute Values as a group (i.e. ANY_OF/ALL_OF/HIERARCHY).
-	//
-	// For example, we may have one group for the Definition FQN "https://namespace.org/attr/MyAttr"
-	// with two Attribute Values on the data:
-	// - "https://namespace.org/attr/MyAttr/value/Value1")
-	// - "https://namespace.org/attr/MyAttr/value/Value2")
 	dataAttrValsByDefinition, err := GroupValuesByDefinition(dataAttributes)
 	if err != nil {
-		pdp.logger.Error(fmt.Sprintf("error grouping data attributes by definition: %s", err.Error()))
-		return nil, err
+		pdp.logger.ErrorContext(ctx, "error grouping data attributes by definition",
+			slog.String("error", err.Error()))
+		return nil, fmt.Errorf("failed to group data attributes by definition: %w", err)
+	}
+
+	// Precompute grouped entity attribute FQNs by definition for all entities
+	entityAttrGroups := make(map[string]map[string][]string)
+	for entityID, attrFqns := range entityAttributeSets {
+		grouped, err := GroupValueFqnsByDefinition(attrFqns)
+		if err != nil {
+			pdp.logger.ErrorContext(ctx, "error grouping entity attribute values for entity",
+				slog.String("entityID", entityID),
+				slog.String("error", err.Error()))
+			return nil, fmt.Errorf("failed to group entity attribute values for entity %s: %w", entityID, err)
+		}
+		entityAttrGroups[entityID] = grouped
 	}
 
 	// Unlike with Values, there should only be *one* Attribute Definition per FQN (e.g "https://namespace.org/attr/MyAttr")
 	fqnToDefinitionMap, err := GetFqnToDefinitionMap(ctx, attributeDefinitions, pdp.logger)
 	if err != nil {
-		pdp.logger.Error(fmt.Sprintf("error grouping attribute definitions by FQN: %s", err.Error()))
+		pdp.logger.ErrorContext(ctx, "error grouping attribute definitions by FQN",
+			slog.String("error", err.Error()))
+		return nil, fmt.Errorf("failed to group attribute definitions by FQN: %w", err)
+	}
+
+	decisions, err := pdp.evaluateDataAttributesForEntities(ctx, dataAttrValsByDefinition, fqnToDefinitionMap, entityAttrGroups)
+	if err != nil {
 		return nil, err
 	}
 
+	return decisions, nil
+}
+
+// evaluateDataAttributesForEntities processes each data attribute definition and updates entity decisions accordingly.
+func (pdp *Pdp) evaluateDataAttributesForEntities(
+	ctx context.Context,
+	dataAttrValsByDefinition map[string][]*policy.Value,
+	fqnToDefinitionMap map[string]*policy.Attribute,
+	entityAttrGroups map[string]map[string][]string,
+) (map[string]*Decision, error) {
 	decisions := make(map[string]*Decision)
-	// Go through all the grouped data values under each definition FQN
 	for definitionFqn, distinctValues := range dataAttrValsByDefinition {
 		pdp.logger.DebugContext(ctx, "Evaluating data attribute fqn", "fqn:", definitionFqn)
 		attrDefinition, ok := fqnToDefinitionMap[definitionFqn]
@@ -58,13 +82,6 @@ func (pdp *Pdp) DetermineAccess(
 			return nil, fmt.Errorf("expected an Attribute Definition under the FQN %s", definitionFqn)
 		}
 
-		// If GroupBy is set, determine which entities (out of the set of entities and their respective Values)
-		// will be considered for evaluation under this Definition's Rule.
-		//
-		// If GroupBy is not set, then we always consider all entities for evaluation under a Rule
-		//
-		// If this rule simply does not apply to a given entity ID as defined by the Attribute Definition we have,
-		// and the entity Values that entity ID has, then that entity ID passed (or skipped) this rule.
 		var (
 			entityRuleDecision map[string]DataRuleResult
 			err                error
@@ -72,13 +89,13 @@ func (pdp *Pdp) DetermineAccess(
 		switch attrDefinition.GetRule() {
 		case policy.AttributeRuleTypeEnum_ATTRIBUTE_RULE_TYPE_ENUM_ALL_OF:
 			pdp.logger.DebugContext(ctx, "Evaluating under allOf", "name", definitionFqn)
-			entityRuleDecision, err = pdp.allOfRule(ctx, distinctValues, entityAttributeSets)
+			entityRuleDecision, err = pdp.allOfRule(ctx, distinctValues, entityAttrGroups)
 		case policy.AttributeRuleTypeEnum_ATTRIBUTE_RULE_TYPE_ENUM_ANY_OF:
 			pdp.logger.DebugContext(ctx, "Evaluating under anyOf", "name", definitionFqn)
-			entityRuleDecision, err = pdp.anyOfRule(ctx, distinctValues, entityAttributeSets)
+			entityRuleDecision, err = pdp.anyOfRule(ctx, distinctValues, entityAttrGroups)
 		case policy.AttributeRuleTypeEnum_ATTRIBUTE_RULE_TYPE_ENUM_HIERARCHY:
 			pdp.logger.DebugContext(ctx, "Evaluating under hierarchy", "name", definitionFqn)
-			entityRuleDecision, err = pdp.hierarchyRule(ctx, distinctValues, entityAttributeSets, attrDefinition.GetValues())
+			entityRuleDecision, err = pdp.hierarchyRule(ctx, distinctValues, entityAttrGroups, attrDefinition.GetValues())
 		case policy.AttributeRuleTypeEnum_ATTRIBUTE_RULE_TYPE_ENUM_UNSPECIFIED:
 			return nil, fmt.Errorf("unset AttributeDefinition rule: %s", attrDefinition.GetRule())
 		default:
@@ -88,34 +105,31 @@ func (pdp *Pdp) DetermineAccess(
 			return nil, fmt.Errorf("error evaluating rule: %s", err.Error())
 		}
 
-		// Roll up the per-data-rule decisions for each entity considered for this rule into the overall decision
 		for entityID, ruleResult := range entityRuleDecision {
-			entityDecision := decisions[entityID]
-
-			ruleResult.RuleDefinition = attrDefinition
-			// If we do not yet have an overall decision for this entity, initialize the map
-			// with entityId as key and a Decision object as value
-			if entityDecision == nil {
-				decisions[entityID] = &Decision{
-					Access:  ruleResult.Passed,
-					Results: []DataRuleResult{ruleResult},
-				}
-			} else {
-				// An overall Decision already exists for this entity, so update it with the new information
-				// from the last rule evaluation -
-				// boolean AND the new rule result for this entity and this rule with the existing access
-				// result for this entity and the previous rules
-				// to make sure we flip the overall access correctly, e.g if existing overall result is
-				// TRUE and this new rule result is FALSE, then overall result flips to FALSE.
-				// If it was previously FALSE it stays FALSE, etc
-				entityDecision.Access = entityDecision.Access && ruleResult.Passed
-				// Append the current rule result to the list of rule results.
-				entityDecision.Results = append(entityDecision.Results, ruleResult)
-			}
+			pdp.updateEntityDecision(decisions, entityID, ruleResult, attrDefinition)
 		}
 	}
-
 	return decisions, nil
+}
+
+// updateEntityDecision updates or initializes the Decision for an entity.
+func (pdp *Pdp) updateEntityDecision(
+	decisions map[string]*Decision,
+	entityID string,
+	ruleResult DataRuleResult,
+	attrDefinition *policy.Attribute,
+) {
+	entityDecision := decisions[entityID]
+	ruleResult.RuleDefinition = attrDefinition
+	if entityDecision == nil {
+		decisions[entityID] = &Decision{
+			Access:  ruleResult.Passed,
+			Results: []DataRuleResult{ruleResult},
+		}
+	} else {
+		entityDecision.Access = entityDecision.Access && ruleResult.Passed
+		entityDecision.Results = append(entityDecision.Results, ruleResult)
+	}
 }
 
 // AllOf the Data Attribute Values should be present in AllOf the Entity's entityAttributeValue sets
@@ -123,10 +137,9 @@ func (pdp *Pdp) DetermineAccess(
 // - a set of data Attribute Values with the same FQN
 // - a map of entity Attribute Values keyed by entity ID
 // Returns a map of DataRuleResults keyed by Subject
-func (pdp *Pdp) allOfRule(ctx context.Context, dataAttrValuesOfOneDefinition []*policy.Value, entityAttributeValueFqns map[string][]string) (map[string]DataRuleResult, error) {
+func (pdp *Pdp) allOfRule(ctx context.Context, dataAttrValuesOfOneDefinition []*policy.Value, entityAttrGroups map[string]map[string][]string) (map[string]DataRuleResult, error) {
 	ruleResultsByEntity := make(map[string]DataRuleResult)
 
-	// All of the data Attribute Values in the arg have the same Definition FQN
 	def, err := GetDefinitionFqnFromValue(dataAttrValuesOfOneDefinition[0])
 	if err != nil {
 		return nil, fmt.Errorf("error getting definition FQN from data attribute value: %s", err.Error())
@@ -134,54 +147,59 @@ func (pdp *Pdp) allOfRule(ctx context.Context, dataAttrValuesOfOneDefinition []*
 	pdp.logger.DebugContext(ctx, "Evaluating allOf decision", "attribute definition FQN", def)
 	pdp.logger.TraceContext(ctx, "Attribute values for ", "attribute definition FQN", def, "values", dataAttrValuesOfOneDefinition)
 
-	// Go through every entity's attributeValues set...
-	for entityID, entityAttrVals := range entityAttributeValueFqns {
-		var valueFailures []ValueFailure
-		// Default to DENY
-		entityPassed := false
-
-		groupedEntityAttrValsByDefinition, err := GroupValueFqnsByDefinition(entityAttrVals)
-		if err != nil {
-			return nil, fmt.Errorf("error grouping entity attribute values by definition: %s", err.Error())
-		}
-
-		// For every unique data Attribute Value in the set sharing the same FQN...
-		for dvIndex, dataAttrVal := range dataAttrValuesOfOneDefinition {
-			attrDefFqn, err := GetDefinitionFqnFromValue(dataAttrVal)
-			if err != nil {
-				return nil, fmt.Errorf("error getting definition FQN from data attribute value: %s", err.Error())
-			}
-			pdp.logger.DebugContext(ctx, "Evaluating allOf decision", "data attr fqn", attrDefFqn, "value", dataAttrVal.GetValue())
-			// See if
-			// 1. there exists an entity Attribute Value in the set of Attribute Values
-			// with the same FQN as the data Attribute Value in question
-			// 2. It has the same VALUE as the data Attribute Value in question
-			found := getIsValueFoundInFqnValuesSet(dataAttrValuesOfOneDefinition[dvIndex], groupedEntityAttrValsByDefinition[attrDefFqn], pdp.logger)
-
-			// If we did not find the data Attribute Value FQN + value in the entity Attribute Value set,
-			// then prepare a ValueFailure for that data Attribute Value for this entity
-			if !found {
-				denialMsg := fmt.Sprintf("AllOf not satisfied for data attr %s with value %s and entity %s", attrDefFqn, dataAttrVal.GetValue(), entityID)
-				pdp.logger.WarnContext(ctx, denialMsg)
-				// Append the ValueFailure to the set of entity value failures
-				valueFailures = append(valueFailures, ValueFailure{
-					DataAttribute: dataAttrValuesOfOneDefinition[dvIndex],
-					Message:       denialMsg,
-				})
-			}
-		}
-
-		// If we have no value failures, we are good - entity passes this rule
-		if len(valueFailures) == 0 {
-			entityPassed = true
-		}
-		ruleResultsByEntity[entityID] = DataRuleResult{
-			Passed:        entityPassed,
-			ValueFailures: valueFailures,
-		}
+	for entityID, groupedEntityAttrValsByDefinition := range entityAttrGroups {
+		ruleResultsByEntity[entityID] = pdp.evaluateAllOfForEntity(ctx, dataAttrValuesOfOneDefinition, groupedEntityAttrValsByDefinition, entityID)
 	}
 
 	return ruleResultsByEntity, nil
+}
+
+// evaluateAllOfForEntity evaluates the allOf rule for a single entity.
+func (pdp *Pdp) evaluateAllOfForEntity(
+	ctx context.Context,
+	dataAttrValuesOfOneDefinition []*policy.Value,
+	groupedEntityAttrValsByDefinition map[string][]string,
+	entityID string,
+) DataRuleResult {
+	var valueFailures []ValueFailure
+	entityPassed := false
+
+	for dvIndex, dataAttrVal := range dataAttrValuesOfOneDefinition {
+		attrDefFqn, err := GetDefinitionFqnFromValue(dataAttrVal)
+		if err != nil {
+			pdp.logger.ErrorContext(ctx, "error getting definition FQN from data attribute value",
+				slog.String("error", err.Error()),
+				slog.String("entityID", entityID))
+			continue
+		}
+		pdp.logger.DebugContext(ctx, "Evaluating allOf decision", "data attr fqn", attrDefFqn, "value", dataAttrVal.GetValue())
+		// Build case-insensitive set for entity attribute FQNs
+		fqnSet := make(map[string]struct{})
+		for _, fqn := range groupedEntityAttrValsByDefinition[attrDefFqn] {
+			fqnSet[strings.ToLower(fqn)] = struct{}{}
+		}
+		found := getIsValueFoundInFqnValuesSet(dataAttrValuesOfOneDefinition[dvIndex], fqnSet, pdp.logger)
+
+		if !found {
+			pdp.logger.WarnContext(ctx, "AllOf not satisfied",
+				slog.String("dataAttrFqn", attrDefFqn),
+				slog.String("value", dataAttrVal.GetValue()),
+				slog.String("entityID", entityID))
+			denialMsg := fmt.Sprintf("AllOf not satisfied for data attr %s with value %s and entity %s", attrDefFqn, dataAttrVal.GetValue(), entityID)
+			valueFailures = append(valueFailures, ValueFailure{
+				DataAttribute: dataAttrValuesOfOneDefinition[dvIndex],
+				Message:       denialMsg,
+			})
+		}
+	}
+
+	if len(valueFailures) == 0 {
+		entityPassed = true
+	}
+	return DataRuleResult{
+		Passed:        entityPassed,
+		ValueFailures: valueFailures,
+	}
 }
 
 // AnyOf the Data Attribute Values can be present in AnyOf the Entity's Attribute Value FQN sets
@@ -189,10 +207,9 @@ func (pdp *Pdp) allOfRule(ctx context.Context, dataAttrValuesOfOneDefinition []*
 // - a set of data Attribute Values with the same FQN
 // - a map of entity Attribute Values keyed by entity ID
 // Returns a map of DataRuleResults keyed by Subject entity ID
-func (pdp *Pdp) anyOfRule(ctx context.Context, dataAttrValuesOfOneDefinition []*policy.Value, entityAttributeValueFqns map[string][]string) (map[string]DataRuleResult, error) {
+func (pdp *Pdp) anyOfRule(ctx context.Context, dataAttrValuesOfOneDefinition []*policy.Value, entityAttrGroups map[string]map[string][]string) (map[string]DataRuleResult, error) {
 	ruleResultsByEntity := make(map[string]DataRuleResult)
 
-	// All of the data Attribute Values in the arg have the same Definition FQN
 	attrDefFqn, err := GetDefinitionFqnFromValue(dataAttrValuesOfOneDefinition[0])
 	if err != nil {
 		return nil, fmt.Errorf("error getting definition FQN from data attribute value: %s", err.Error())
@@ -200,51 +217,55 @@ func (pdp *Pdp) anyOfRule(ctx context.Context, dataAttrValuesOfOneDefinition []*
 	pdp.logger.DebugContext(ctx, "Evaluating anyOf decision", "attribute definition FQN", attrDefFqn)
 	pdp.logger.TraceContext(ctx, "Attribute values for ", "attribute definition FQN", attrDefFqn, "values", dataAttrValuesOfOneDefinition)
 
-	// Go through every entity's Attribute Value set...
-	for entityID, entityAttrValFqns := range entityAttributeValueFqns {
-		var valueFailures []ValueFailure
-		// Default to DENY
-		entityPassed := false
-
-		entityAttrGroup, err := GroupValueFqnsByDefinition(entityAttrValFqns)
-		if err != nil {
-			return nil, fmt.Errorf("error grouping entity attribute values by definition: %s", err.Error())
-		}
-
-		// For every unique data Attribute Value in this set of data Attribute Value sharing the same FQN...
-		for dvIndex, dataAttrVal := range dataAttrValuesOfOneDefinition {
-			pdp.logger.DebugContext(ctx, "Evaluating anyOf decision", "attribute definition FQN", attrDefFqn, "value", dataAttrVal.GetValue())
-			// See if there exists an entity Attribute Value in the set of Attribute Values
-			// with the same FQN as the data Attribute Value in question
-			found := getIsValueFoundInFqnValuesSet(dataAttrVal, entityAttrGroup[attrDefFqn], pdp.logger)
-
-			// If we did not find the data Attribute Value FQN + value in the entity Attribute Value set,
-			// then prepare a ValueFailure for that data Attribute Value and value, for this entity
-			if !found {
-				denialMsg := fmt.Sprintf("anyOf not satisfied for data attr %s with value %s and entity %s - anyOf is permissive, so this doesn't mean overall failure", attrDefFqn, dataAttrVal.GetValue(), entityID)
-				pdp.logger.WarnContext(ctx, denialMsg)
-				valueFailures = append(valueFailures, ValueFailure{
-					DataAttribute: dataAttrValuesOfOneDefinition[dvIndex],
-					Message:       denialMsg,
-				})
-			}
-		}
-
-		// AnyOf - IF there were fewer value failures for this entity, for this Attribute Value FQN,
-		// then there are distinct data values, for this Attribute Value FQN, THEN this entity must
-		// possess AT LEAST ONE of the values in its entity Attribute Value group,
-		// and we have satisfied AnyOf
-		if len(valueFailures) < len(dataAttrValuesOfOneDefinition) {
-			pdp.logger.DebugContext(ctx, "anyOf satisfied", "attribute definition FQN", attrDefFqn, "entityId", entityID)
-			entityPassed = true
-		}
-		ruleResultsByEntity[entityID] = DataRuleResult{
-			Passed:        entityPassed,
-			ValueFailures: valueFailures,
-		}
+	for entityID, entityAttrGroup := range entityAttrGroups {
+		ruleResultsByEntity[entityID] = pdp.evaluateAnyOfForEntity(ctx, dataAttrValuesOfOneDefinition, entityAttrGroup, entityID, attrDefFqn)
 	}
 
 	return ruleResultsByEntity, nil
+}
+
+// evaluateAnyOfForEntity evaluates the anyOf rule for a single entity.
+func (pdp *Pdp) evaluateAnyOfForEntity(
+	ctx context.Context,
+	dataAttrValuesOfOneDefinition []*policy.Value,
+	entityAttrGroup map[string][]string,
+	entityID string,
+	attrDefFqn string,
+) DataRuleResult {
+	var valueFailures []ValueFailure
+	entityPassed := false
+
+	// Build case-insensitive set for entity attribute FQNs
+	fqnSet := make(map[string]struct{})
+	for _, fqn := range entityAttrGroup[attrDefFqn] {
+		fqnSet[strings.ToLower(fqn)] = struct{}{}
+	}
+
+	for dvIndex, dataAttrVal := range dataAttrValuesOfOneDefinition {
+		pdp.logger.DebugContext(ctx, "Evaluating anyOf decision", "attribute definition FQN", attrDefFqn, "value", dataAttrVal.GetValue())
+		found := getIsValueFoundInFqnValuesSet(dataAttrVal, fqnSet, pdp.logger)
+
+		if !found {
+			pdp.logger.WarnContext(ctx, "anyOf not satisfied",
+				slog.String("dataAttrFqn", attrDefFqn),
+				slog.String("value", dataAttrVal.GetValue()),
+				slog.String("entityID", entityID))
+			denialMsg := fmt.Sprintf("anyOf not satisfied for data attr %s with value %s and entity %s - anyOf is permissive, so this doesn't mean overall failure", attrDefFqn, dataAttrVal.GetValue(), entityID)
+			valueFailures = append(valueFailures, ValueFailure{
+				DataAttribute: dataAttrValuesOfOneDefinition[dvIndex],
+				Message:       denialMsg,
+			})
+		}
+	}
+
+	if len(valueFailures) < len(dataAttrValuesOfOneDefinition) {
+		pdp.logger.DebugContext(ctx, "anyOf satisfied", "attribute definition FQN", attrDefFqn, "entityId", entityID)
+		entityPassed = true
+	}
+	return DataRuleResult{
+		Passed:        entityPassed,
+		ValueFailures: valueFailures,
+	}
 }
 
 // Hierarchy rule compares the HIGHEST (that is, numerically lowest index) data Attribute Value for a given Attribute Value FQN
@@ -255,10 +276,29 @@ func (pdp *Pdp) anyOfRule(ctx context.Context, dataAttrValuesOfOneDefinition []*
 //
 // If multiple entity Attribute Values for a hierarchy AttributeDefinition are present for the same FQN, the lowest will be chosen,
 // and the others ignored.
-func (pdp *Pdp) hierarchyRule(ctx context.Context, dataAttrValuesOfOneDefinition []*policy.Value, entityAttributeValueFqns map[string][]string, order []*policy.Value) (map[string]DataRuleResult, error) {
-	ruleResultsByEntity := make(map[string]DataRuleResult)
+func buildFqnOrderMap(order []*policy.Value) map[string]int {
+	m := make(map[string]int, len(order))
+	for idx, v := range order {
+		fqn := v.GetFqn()
+		if fqn == "" {
+			defFqn, err := GetDefinitionFqnFromValue(v)
+			if err == nil && defFqn != "" && v.GetValue() != "" {
+				fqn = fmt.Sprintf("%s/value/%s", defFqn, v.GetValue())
+			}
+		}
+		// Only assign an index if FQN is valid (non-empty)
+		if fqn != "" {
+			m[fqn] = idx
+		}
+	}
+	return m
+}
 
-	highestDataAttrVal, err := pdp.getHighestRankedInstanceFromDataAttributes(ctx, order, dataAttrValuesOfOneDefinition, pdp.logger)
+func (pdp *Pdp) hierarchyRule(ctx context.Context, dataAttrValuesOfOneDefinition []*policy.Value, entityAttrGroups map[string]map[string][]string, order []*policy.Value) (map[string]DataRuleResult, error) {
+	ruleResultsByEntity := make(map[string]DataRuleResult)
+	fqnOrderMap := buildFqnOrderMap(order)
+
+	highestDataAttrVal, err := pdp.getHighestRankedInstanceFromDataAttributes(ctx, order, fqnOrderMap, dataAttrValuesOfOneDefinition, pdp.logger)
 	if err != nil {
 		return nil, fmt.Errorf("error getting highest ranked instance from data attributes: %s", err.Error())
 	}
@@ -267,67 +307,74 @@ func (pdp *Pdp) hierarchyRule(ctx context.Context, dataAttrValuesOfOneDefinition
 	} else {
 		pdp.logger.DebugContext(ctx, "Highest ranked hierarchy value on data attributes found", "value", highestDataAttrVal.GetValue())
 	}
-	// All the data Attribute Values in the arg have the same FQN.
 
-	// Go through every entity's Attribute Value set...
-	for entityID, entityAttrs := range entityAttributeValueFqns {
-		// Default to DENY
-		entityPassed := false
-		valueFailures := []ValueFailure{}
-
-		// Group entity Attribute Values by FQN...
-		entityAttrGroup, err := GroupValueFqnsByDefinition(entityAttrs)
-		if err != nil {
-			return nil, fmt.Errorf("error grouping entity attribute values by definition: %s", err.Error())
-		}
-
-		if highestDataAttrVal != nil {
-			attrDefFqn, err := GetDefinitionFqnFromValue(highestDataAttrVal)
-			if err != nil {
-				return nil, fmt.Errorf("error getting definition FQN from data attribute value: %s", err.Error())
-			}
-			// For every unique data Attribute Value in this set of data Attribute Values sharing the same FQN...
-			pdp.logger.DebugContext(ctx, "Evaluating hierarchy decision", "attribute definition fqn", attrDefFqn, "value", highestDataAttrVal.GetValue())
-			pdp.logger.TraceContext(ctx, "Value obj", "value", highestDataAttrVal.GetValue(), "obj", highestDataAttrVal)
-
-			// Compare the (one or more) Attribute Values for this FQN to the (one) data Attribute Value, and see which is "higher".
-			passed, err := entityRankGreaterThanOrEqualToDataRank(order, highestDataAttrVal, entityAttrGroup[attrDefFqn], pdp.logger)
-			if err != nil {
-				return nil, fmt.Errorf("error comparing entity rank to data rank: %s", err.Error())
-			}
-			entityPassed = passed
-
-			// If the rank of the data Attribute Value is higher than the highest entity Attribute Value, then FAIL.
-			if !entityPassed {
-				denialMsg := fmt.Sprintf("Hierarchy - Entity: %s hierarchy values rank below data hierarchy value of %s", entityID, highestDataAttrVal.GetValue())
-				pdp.logger.WarnContext(ctx, denialMsg)
-
-				// Since there is only one data value we (ultimately) consider in a HierarchyRule, we will only ever
-				// have one ValueFailure per entity at most
-				valueFailures = append(valueFailures, ValueFailure{
-					DataAttribute: highestDataAttrVal,
-					Message:       denialMsg,
-				})
-			}
-			// It's possible we couldn't FIND a highest data value - because none of the data values are in the set of valid attribute definition values!
-			// If this happens, we can't do a comparison, and access will be denied for every entity for this data attribute instance
-		} else {
-			// If every data attribute value we're comparing against is invalid (that is, none of them exist in the attribute definition)
-			// then we must fail and return a nil instance.
-			denialMsg := fmt.Sprintf("Hierarchy - No data values found exist in attribute definition, no hierarchy comparison possible, entity %s is denied", entityID)
-			pdp.logger.WarnContext(ctx, denialMsg)
-			valueFailures = append(valueFailures, ValueFailure{
-				DataAttribute: nil,
-				Message:       denialMsg,
-			})
-		}
-		ruleResultsByEntity[entityID] = DataRuleResult{
-			Passed:        entityPassed,
-			ValueFailures: valueFailures,
-		}
+	for entityID, entityAttrGroup := range entityAttrGroups {
+		ruleResultsByEntity[entityID] = pdp.evaluateHierarchyForEntity(ctx, highestDataAttrVal, fqnOrderMap, entityAttrGroup, entityID)
 	}
 
 	return ruleResultsByEntity, nil
+}
+
+// evaluateHierarchyForEntity evaluates the hierarchy rule for a single entity.
+func (pdp *Pdp) evaluateHierarchyForEntity(
+	ctx context.Context,
+	highestDataAttrVal *policy.Value,
+	fqnOrderMap map[string]int,
+	entityAttrGroup map[string][]string,
+	entityID string,
+) DataRuleResult {
+	entityPassed := false
+	valueFailures := []ValueFailure{}
+
+	if highestDataAttrVal != nil {
+		attrDefFqn, err := GetDefinitionFqnFromValue(highestDataAttrVal)
+		if err != nil {
+			pdp.logger.ErrorContext(ctx, "error getting definition FQN from data attribute value",
+				slog.String("error", err.Error()),
+				slog.String("entityID", entityID))
+			return DataRuleResult{
+				Passed:        false,
+				ValueFailures: valueFailures,
+			}
+		}
+		pdp.logger.DebugContext(ctx, "Evaluating hierarchy decision", "attribute definition fqn", attrDefFqn, "value", highestDataAttrVal.GetValue())
+		pdp.logger.TraceContext(ctx, "Value obj", "value", highestDataAttrVal.GetValue(), "obj", highestDataAttrVal)
+
+		passed, err := entityRankGreaterThanOrEqualToDataRank(fqnOrderMap, highestDataAttrVal, entityAttrGroup[attrDefFqn], pdp.logger)
+		if err != nil {
+			pdp.logger.ErrorContext(ctx, "error comparing entity rank to data rank",
+				slog.String("error", err.Error()),
+				slog.String("entityID", entityID))
+			return DataRuleResult{
+				Passed:        false,
+				ValueFailures: valueFailures,
+			}
+		}
+		entityPassed = passed
+
+		if !entityPassed {
+			pdp.logger.WarnContext(ctx, "Hierarchy not satisfied",
+				slog.String("entityID", entityID),
+				slog.String("dataValue", highestDataAttrVal.GetValue()))
+			denialMsg := fmt.Sprintf("Hierarchy - Entity: %s hierarchy values rank below data hierarchy value of %s", entityID, highestDataAttrVal.GetValue())
+			valueFailures = append(valueFailures, ValueFailure{
+				DataAttribute: highestDataAttrVal,
+				Message:       denialMsg,
+			})
+		}
+	} else {
+		pdp.logger.WarnContext(ctx, "Hierarchy - No data values found exist in attribute definition, no hierarchy comparison possible",
+			slog.String("entityID", entityID))
+		denialMsg := fmt.Sprintf("Hierarchy - No data values found exist in attribute definition, no hierarchy comparison possible, entity %s is denied", entityID)
+		valueFailures = append(valueFailures, ValueFailure{
+			DataAttribute: nil,
+			Message:       denialMsg,
+		})
+	}
+	return DataRuleResult{
+		Passed:        entityPassed,
+		ValueFailures: valueFailures,
+	}
 }
 
 // It is possible that a data policy may have more than one Hierarchy value for the same data attribute definition
@@ -339,27 +386,24 @@ func (pdp *Pdp) hierarchyRule(ctx context.Context, dataAttrValuesOfOneDefinition
 // present in the set of data Attribute Values, and use that as the point of comparison, ignoring the "lower-ranked" data values.
 // If we find a data value that does not exist in the attribute definition's list of valid values, we will skip it
 // If NONE of the data values exist in the attribute definitions list of valid values, return a nil instance
-func (pdp *Pdp) getHighestRankedInstanceFromDataAttributes(ctx context.Context, order []*policy.Value, dataAttributeGroup []*policy.Value, logger *logger.Logger) (*policy.Value, error) {
+func (pdp *Pdp) getHighestRankedInstanceFromDataAttributes(ctx context.Context, order []*policy.Value, fqnOrderMap map[string]int, dataAttributeGroup []*policy.Value, logger *logger.Logger) (*policy.Value, error) {
 	// For hierarchy, convention is 0 == most privileged, 1 == less privileged, etc
 	// So initialize with the LEAST privileged rank in the defined order
 	highestDVIndex := len(order) - 1
 	var highestRankedInstance *policy.Value
 	for _, dataAttr := range dataAttributeGroup {
-		foundRank, err := getOrderOfValue(order, dataAttr, logger)
+		foundRank, err := getOrderOfValueWithMap(fqnOrderMap, order, dataAttr, logger)
 		if err != nil {
 			return nil, fmt.Errorf("error getting order of value: %s", err.Error())
 		}
 		if foundRank == -1 {
-			msg := fmt.Sprintf("Data value %s is not in %s and is not a valid value for this attribute - ignoring this invalid value and continuing to look for a valid one...", dataAttr.GetValue(), order)
-			pdp.logger.WarnContext(ctx, msg)
-			// If this isn't a valid data value, skip this iteration and look at the next one - maybe it is?
-			// If none of them are valid, we should return a nil instance
+			msg := fmt.Sprintf("Data value %s is not in order and is not a valid value for this attribute - ignoring this invalid value and continuing to look for a valid one...", dataAttr.GetValue())
+			pdp.logger.WarnContext(ctx, "invalid data value for attribute",
+				slog.String("value", dataAttr.GetValue()),
+				slog.String("error", msg))
 			continue
 		}
 		pdp.logger.DebugContext(ctx, "Found data", "rank", foundRank, "value", dataAttr.GetValue(), "maxRank", highestDVIndex)
-		// If this rank is a "higher rank" (that is, a lower index) than the last one,
-		// (or it is the same rank, to handle cases where the lowest is the only)
-		// it becomes the new high watermark rank.
 		if foundRank <= highestDVIndex {
 			pdp.logger.DebugContext(ctx, "Updating rank!")
 			highestDVIndex = foundRank
@@ -371,18 +415,15 @@ func (pdp *Pdp) getHighestRankedInstanceFromDataAttributes(ctx context.Context, 
 }
 
 // Check for a match of a singular Attribute Value in a set of Attribute Value FQNs
-func getIsValueFoundInFqnValuesSet(v *policy.Value, fqns []string, l *logger.Logger) bool {
+func getIsValueFoundInFqnValuesSet(v *policy.Value, fqnSet map[string]struct{}, l *logger.Logger) bool {
 	valFqn := v.GetFqn()
 	if valFqn == "" {
-		l.Error(fmt.Sprintf("Unexpected empty FQN for value %+v", v))
+		l.Error("Unexpected empty FQN for value",
+			slog.Any("value", v))
 		return false
 	}
-	for _, fqn := range fqns {
-		if strings.EqualFold(valFqn, fqn) {
-			return true
-		}
-	}
-	return false
+	_, found := fqnSet[strings.ToLower(valFqn)]
+	return found
 }
 
 // Given set of ordered/ranked values, a data singular Attribute Value, and a set of entity Attribute Values,
@@ -390,26 +431,16 @@ func getIsValueFoundInFqnValuesSet(v *policy.Value, fqns []string, l *logger.Log
 // the rank of the data Attribute Value.
 // For hierarchy, convention is 0 == most privileged, 1 == less privileged, etc
 func entityRankGreaterThanOrEqualToDataRank(
-	order []*policy.Value, dataAttribute *policy.Value,
+	fqnOrderMap map[string]int, dataAttribute *policy.Value,
 	entityAttrValueFqnsGroup []string,
 	log *logger.Logger,
 ) (bool, error) {
-	// default to least-perm
 	result := false
-	dvIndex, err := getOrderOfValue(order, dataAttribute, log)
+	dvIndex, err := getOrderOfValueWithMap(fqnOrderMap, nil, dataAttribute, log)
 	if err != nil {
 		return false, err
 	}
-	// Compute the rank of the entity Attribute Value against the rank of the data Attribute Value
-	// While, for hierarchy, we only ever have a singular data value we're checking
-	// for a given data Attribute Value FQN,
-	// we may have *several* entity values for a given entity Attribute Value FQN -
-	// so if an entity has multiple values that can be compared for the hierarchy rule,
-	// we check all of them and go with the value that has the least-significant index when deciding access
 	for _, entityAttributeFqn := range entityAttrValueFqnsGroup {
-		// Ideally, the caller will have already ensured all the entity Attribute Values we've been provided
-		// have the same FQN as the data Attribute Value we're comparing against,
-		// but if they haven't for some reason only consider matching entity Attribute Values
 		dataAttrDefFqn, err := GetDefinitionFqnFromValue(dataAttribute)
 		if err != nil {
 			return false, fmt.Errorf("error getting definition FQN from data attribute value: %s", err.Error())
@@ -419,21 +450,12 @@ func entityRankGreaterThanOrEqualToDataRank(
 			return false, fmt.Errorf("error getting definition FQN from entity attribute value: %s", err.Error())
 		}
 		if dataAttrDefFqn == entityAttrDefFqn {
-			evIndex, err := getOrderOfValueByFqn(order, entityAttributeFqn)
-			if err != nil {
-				return false, err
+			evIndex := -1
+			if idx, ok := fqnOrderMap[entityAttributeFqn]; ok {
+				evIndex = idx
+			} else {
+				evIndex = len(fqnOrderMap) + 1
 			}
-			// If the entity value isn't IN the order at all,
-			// then set it's rank to one below the lowest rank in the current
-			// order so it will always fail
-			if evIndex == -1 {
-				evIndex = len(order) + 1
-			}
-			// If, at any point, we find an entity Attribute Value that is below the data Attribute Value in rank,
-			// (that is, numerically greater than the data rank)
-			// (or if the data value itself is < 0, indicating it's not actually part of the defined order)
-			// then we must immediately assume failure for this entity
-			// and return.
 			if evIndex > dvIndex || dvIndex == -1 {
 				result = false
 				return result, nil
@@ -448,53 +470,23 @@ func entityRankGreaterThanOrEqualToDataRank(
 // Given a set of ordered/ranked values and a singular Attribute Value, return the
 // rank #/index of the singular Attribute Value. If the value is not found, return -1.
 // For hierarchy, convention is 0 == most privileged, 1 == less privileged, etc.
-func getOrderOfValue(order []*policy.Value, v *policy.Value, log *logger.Logger) (int, error) {
-	val := v.GetValue()
+func getOrderOfValueWithMap(fqnOrderMap map[string]int, order []*policy.Value, v *policy.Value, log *logger.Logger) (int, error) {
 	valFqn := v.GetFqn()
-	if val == "" {
-		log.Debug(fmt.Sprintf("Unexpected empty 'value' in value: %+v, falling back to FQN", v))
-		return getOrderOfValueByFqn(order, valFqn)
+	if valFqn == "" {
+		log.Debug("Unexpected empty FQN in value",
+			slog.Any("value", v))
+		return -1, nil
 	}
-
-	for idx := range order {
-		orderVal := order[idx].GetValue()
-		if orderVal == "" {
-			return -1, fmt.Errorf("unexpected empty value %+v in order at index %d", order[idx], idx)
-		}
-		if orderVal == val {
-			return idx, nil
-		}
+	if idx, ok := fqnOrderMap[valFqn]; ok {
+		return idx, nil
 	}
-
-	// If we did not find the right index, return -1
 	return -1, nil
 }
 
 // Given a set of ordered/ranked values and a singular Attribute Value, return the
 // rank #/index of the singular Attribute Value. If the value is not found, return -1.
 // For hierarchy, convention is 0 == most privileged, 1 == less privileged, etc
-func getOrderOfValueByFqn(order []*policy.Value, valFqn string) (int, error) {
-	for idx := range order {
-		orderValFqn := order[idx].GetFqn()
-		// We should have this, but if not, rebuild it from the value
-		if orderValFqn == "" {
-			defFqn, err := GetDefinitionFqnFromValue(order[idx])
-			if err != nil {
-				return -1, fmt.Errorf("error getting definition FQN from value: %s", err.Error())
-			}
-			orderVal := order[idx].GetValue()
-			if orderVal == "" {
-				return -1, fmt.Errorf("unexpected empty value %+v in order at index %d", order[idx], idx)
-			}
-			orderValFqn = fmt.Sprintf("%s/value/%s", defFqn, orderVal)
-		}
-		if orderValFqn == valFqn {
-			return idx, nil
-		}
-	}
-
-	return -1, nil
-}
+/* getOrderOfValueByFqn is now obsolete, replaced by getOrderOfValueWithMap */
 
 // A Decision represents the overall access decision for a specific entity,
 // - that is, the aggregate result of comparing entity Attribute Values to every data Attribute Value.
@@ -569,8 +561,11 @@ func GetFqnToDefinitionMap(ctx context.Context, attributeDefinitions []*policy.A
 		}
 		if v, ok := grouped[a]; ok {
 			// TODO: is this really an error case, or is logging a warning okay?
-			log.Warn(fmt.Sprintf("duplicate Attribute Definition FQN %s found when building FQN map which may indicate an issue", a))
-			log.TraceContext(ctx, "duplicate attribute definitions found are: ", "attr1", v, "attr2", def)
+			log.WarnContext(ctx, "duplicate Attribute Definition FQN found when building FQN map",
+				slog.String("fqn", a))
+			log.TraceContext(ctx, "duplicate attribute definitions found",
+				slog.Any("attr1", v),
+				slog.Any("attr2", def))
 		}
 		grouped[a] = def
 	}

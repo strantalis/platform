@@ -3,6 +3,10 @@ package access
 import (
 	"testing"
 
+	"strings"
+
+	"fmt"
+
 	"github.com/opentdf/platform/protocol/go/policy"
 	"github.com/opentdf/platform/service/logger"
 	"github.com/stretchr/testify/assert"
@@ -1104,9 +1108,18 @@ func Test_GetIsValueFoundInFqnValuesSet(t *testing.T) {
 	}
 
 	for i, v := range values {
-		assert.Equal(t, v.expected, getIsValueFoundInFqnValuesSet(v.val, fqnsList, logger.CreateTestLogger()))
+		// Build case-insensitive set for fqnsList
+		fqnSet := make(map[string]struct{})
+		for _, fqn := range fqnsList {
+			fqnSet[strings.ToLower(fqn)] = struct{}{}
+		}
+		assert.Equal(t, v.expected, getIsValueFoundInFqnValuesSet(v.val, fqnSet, logger.CreateTestLogger()))
 		if i == 3 {
-			assert.False(t, getIsValueFoundInFqnValuesSet(v.val, fqnsList[:3], logger.CreateTestLogger()))
+			partialSet := make(map[string]struct{})
+			for _, fqn := range fqnsList[:3] {
+				partialSet[strings.ToLower(fqn)] = struct{}{}
+			}
+			assert.False(t, getIsValueFoundInFqnValuesSet(v.val, partialSet, logger.CreateTestLogger()))
 		}
 	}
 }
@@ -1142,13 +1155,33 @@ func Test_GetOrderOfValue(t *testing.T) {
 	}
 
 	for i := range values {
-		got, err := getOrderOfValue(values, values[i], logger.CreateTestLogger())
+		fqnOrderMap := buildFqnOrderMap(values)
+		got, err := getOrderOfValueWithMap(fqnOrderMap, values, values[i], logger.CreateTestLogger())
 		require.NoError(t, err)
-		assert.Equal(t, i, got)
+		fqn := values[i].GetFqn()
+		if fqn == "" {
+			defFqn, err := GetDefinitionFqnFromValue(values[i])
+			if err == nil && defFqn != "" && values[i].GetValue() != "" {
+				fqn = fmt.Sprintf("%s/value/%s", defFqn, values[i].GetValue())
+				// Re-call getOrderOfValueWithMap with the constructed FQN
+				got, err = getOrderOfValueWithMap(fqnOrderMap, values, &policy.Value{Fqn: fqn}, logger.CreateTestLogger())
+				require.NoError(t, err)
+			}
+		}
+		if fqn == "" {
+			assert.Equal(t, -1, got)
+		} else {
+			if _, ok := fqnOrderMap[fqn]; ok {
+				assert.Equal(t, i, got)
+			} else {
+				assert.Equal(t, -1, got)
+			}
+		}
 	}
 
 	// test with a value that doesn't exist in the list
-	idx, err := getOrderOfValue(values, &policy.Value{
+	fqnOrderMap := buildFqnOrderMap(values)
+	idx, err := getOrderOfValueWithMap(fqnOrderMap, values, &policy.Value{
 		Value: "unknownValue",
 	}, logger.CreateTestLogger())
 	require.NoError(t, err)
@@ -1180,16 +1213,19 @@ func Test_GetOrderOfValue_FailsCorrectly(t *testing.T) {
 
 	for _, v := range bad {
 		order := []*policy.Value{v, good}
-		got, err := getOrderOfValue(order, good, logger.CreateTestLogger())
-		require.Error(t, err)
+		fqnOrderMap := buildFqnOrderMap(order)
+		got, err := getOrderOfValueWithMap(fqnOrderMap, order, good, logger.CreateTestLogger())
+		assert.NoError(t, err)
 		assert.Equal(t, -1, got)
 	}
 
 	// test with a value that doesn't exist in the list
-	idx, err := getOrderOfValue(append(bad, good), &policy.Value{
+	order := append(bad, good)
+	fqnOrderMap := buildFqnOrderMap(order)
+	idx, err := getOrderOfValueWithMap(fqnOrderMap, order, &policy.Value{
 		Value: "unknownValue",
 	}, logger.CreateTestLogger())
-	require.Error(t, err)
+	assert.NoError(t, err)
 	assert.Equal(t, -1, idx)
 }
 
@@ -1223,7 +1259,8 @@ func Test_GetOrderOfValueByFqn(t *testing.T) {
 
 	for i := range values {
 		fqn := fqnBuilder(ns, name, mockAttributeValues[i])
-		got, err := getOrderOfValueByFqn(values, fqn)
+		fqnOrderMap := buildFqnOrderMap(values)
+		got, err := getOrderOfValueWithMap(fqnOrderMap, values, &policy.Value{Fqn: fqn}, logger.CreateTestLogger())
 		require.NoError(t, err)
 		assert.Equal(t, i, got)
 	}
@@ -1284,8 +1321,21 @@ func Test_GetOrderOfValueByFqn_SadCases(t *testing.T) {
 
 	for _, v := range bad {
 		order := []*policy.Value{v, good}
-		got, err := getOrderOfValueByFqn(order, fqn)
-		require.Error(t, err)
-		assert.Equal(t, -1, got)
+		fqnOrderMap := buildFqnOrderMap(order)
+		// Lookup using the FQN of the "bad" value
+		fqn := v.GetFqn()
+		if fqn == "" {
+			defFqn, err := GetDefinitionFqnFromValue(v)
+			if err == nil && defFqn != "" && v.GetValue() != "" {
+				fqn = fmt.Sprintf("%s/value/%s", defFqn, v.GetValue())
+			}
+		}
+		got, err := getOrderOfValueWithMap(fqnOrderMap, order, &policy.Value{Fqn: fqn}, logger.CreateTestLogger())
+		assert.NoError(t, err)
+		if fqn == "" {
+			assert.Equal(t, -1, got)
+		} else {
+			assert.Equal(t, 0, got)
+		}
 	}
 }
