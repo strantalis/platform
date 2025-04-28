@@ -111,11 +111,12 @@ type KeyDetailsAdapter struct {
 	algorithm      string
 	legacy         bool
 	cryptoProvider CryptoProvider
+	mode           string
 }
 
 // Mode returns the mode of the key details
 func (k *KeyDetailsAdapter) Mode() string {
-	return modeInProcess
+	return k.mode
 }
 
 func (k *KeyDetailsAdapter) ID() trust.KeyIdentifier {
@@ -198,6 +199,7 @@ func (a *InProcessProvider) FindKeyByAlgorithm(_ context.Context, algorithm stri
 		id:             trust.KeyIdentifier(kid),
 		algorithm:      algorithm,
 		cryptoProvider: a.cryptoProvider,
+		mode:           modeInProcess,
 	}, nil
 }
 
@@ -213,6 +215,7 @@ func (a *InProcessProvider) FindKeyByID(_ context.Context, id trust.KeyIdentifie
 					algorithm:      alg,
 					legacy:         false,
 					cryptoProvider: a.cryptoProvider,
+					mode:           modeInProcess,
 				}, nil
 			}
 		} else if alg == AlgorithmRSA2048 {
@@ -222,6 +225,7 @@ func (a *InProcessProvider) FindKeyByID(_ context.Context, id trust.KeyIdentifie
 					algorithm:      alg,
 					legacy:         false,
 					cryptoProvider: a.cryptoProvider,
+					mode:           modeInProcess,
 				}, nil
 			}
 		}
@@ -241,6 +245,7 @@ func (a *InProcessProvider) ListKeys(_ context.Context) ([]trust.KeyDetails, err
 				id:             trust.KeyIdentifier(kid),
 				algorithm:      alg,
 				cryptoProvider: a.cryptoProvider,
+				mode:           modeInProcess,
 			})
 		}
 	}
