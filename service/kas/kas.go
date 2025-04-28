@@ -69,7 +69,7 @@ func NewRegistration() *serviceregistry.Service[kasconnect.AccessServiceHandler]
 				//	p.KeyManager = srp.OTDF.TrustKeyManager
 				//}
 
-				p.KeyIndex = trust.NewPlatformKeyIndexer(srp.SDK)
+				p.KeyIndex = trust.NewPlatformKeyIndexer(srp.SDK, srp.Logger)
 				dks := trust.NewDelegatingKeyService(p.KeyIndex, srp.Logger)
 				dks.RegisterKeyManager("opentdf.io/file", func(index trust.KeyIndex, l *logger.Logger) (trust.KeyManager, error) {
 					var platformIndex *trust.PlatformKeyIndexer

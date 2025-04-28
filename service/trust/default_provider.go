@@ -12,10 +12,13 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 
+	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/opentdf/platform/protocol/go/policy"
 	"github.com/opentdf/platform/service/logger"
 	"golang.org/x/crypto/hkdf"
@@ -292,6 +295,30 @@ func (d *Default) UnwrapKey(ctx context.Context, wrappedKey, kek []byte) ([]byte
 	return d.DecryptSymmetric(ctx, kek, wrappedKey)
 }
 
+func (d *Default) RSAPublicKeyAsJSON(_ context.Context, pubPEM string) (string, error) {
+	pub, err := parsePEMPublicKey([]byte(pubPEM))
+	if err != nil {
+		return "", fmt.Errorf("failed to parse PEM public key: %w", err)
+	}
+
+	rsaPub, ok := pub.(*rsa.PublicKey)
+	if !ok {
+		return "", fmt.Errorf("not an RSA public key")
+	}
+
+	rsaPublicKeyJwk, err := jwk.FromRaw(rsaPub)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal RSA public key to JSON: %w", err)
+	}
+
+	jsonPublicKey, err := json.Marshal(rsaPublicKeyJwk)
+	if err != nil {
+		return "", fmt.Errorf("jwk.FromRaw: %w", err)
+	}
+
+	return string(jsonPublicKey), nil
+}
+
 func deriveKeyHKDF(secret, salt []byte, info string, length int) ([]byte, error) {
 	if len(secret) == 0 {
 		return nil, fmt.Errorf("input key material (secret) must not be empty")
@@ -316,4 +343,10 @@ func tdfSalt() []byte {
 	digest.Write([]byte("TDF"))
 	salt := digest.Sum(nil)
 	return salt
+}
+
+func convertPEMToJWK(_ string) (string, error) {
+	// Implement the conversion logic here or use an external library if available.
+	// For now, return a placeholder error to indicate the function is not implemented.
+	return "", errors.New("convertPEMToJWK function is not implemented")
 }
