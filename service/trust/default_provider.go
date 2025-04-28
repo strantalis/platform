@@ -1,4 +1,4 @@
-package security
+package trust
 
 import (
 	"context"
@@ -15,9 +15,9 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
-	"log/slog"
 
 	"github.com/opentdf/platform/protocol/go/policy"
+	"github.com/opentdf/platform/service/logger"
 	"golang.org/x/crypto/hkdf"
 )
 
@@ -36,11 +36,11 @@ const (
 
 // Default implements the cryptographic provider interface using standard Go crypto packages
 type Default struct {
-	l *slog.Logger
+	l *logger.Logger
 }
 
 // NewDefault creates a new instance of the default crypto provider
-func NewDefault(l *slog.Logger) *Default {
+func NewDefault(l *logger.Logger) *Default {
 	return &Default{l: l}
 }
 
@@ -152,7 +152,7 @@ func (d *Default) EncryptAsymmetric(_ context.Context, alg string, key []byte, h
 		}
 
 		// Use shared secret to derive decryption key
-		dk, err := deriveKeyHKDF(secret, TDFSalt(), "", len(secret))
+		dk, err := deriveKeyHKDF(secret, tdfSalt(), "", len(secret))
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to derive decryption key: %w", err)
 		}
@@ -219,7 +219,7 @@ func (d *Default) DecryptAsymmetric(_ context.Context, alg string, key, cipherTe
 
 		// Use shared secret to derive decryption key
 
-		dk, err := deriveKeyHKDF(secret, TDFSalt(), "", len(secret))
+		dk, err := deriveKeyHKDF(secret, tdfSalt(), "", len(secret))
 		if err != nil {
 			return nil, fmt.Errorf("failed to derive decryption key: %w", err)
 		}
@@ -309,4 +309,11 @@ func deriveKeyHKDF(secret, salt []byte, info string, length int) ([]byte, error)
 	}
 
 	return derivedKey, nil
+}
+
+func tdfSalt() []byte {
+	digest := sha256.New()
+	digest.Write([]byte("TDF"))
+	salt := digest.Sum(nil)
+	return salt
 }

@@ -1,19 +1,18 @@
-package security
+package trust
 
 import (
 	"context"
+	"crypto/elliptic"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"os"
 
-	"github.com/opentdf/platform/sdk"
-	"github.com/opentdf/platform/service/trust"
+	"github.com/opentdf/platform/service/logger"
 )
 
 type FileKeyManager struct {
 	*PlatformKeyIndexer
-	log *slog.Logger
+	log *logger.Logger
 	*Default
 }
 
@@ -21,9 +20,9 @@ const (
 	fileKeyManagerName = "opentdf.io/file"
 )
 
-func NewFileKeyManager(sdk *sdk.SDK, l *slog.Logger) *FileKeyManager {
+func NewFileKeyManager(index *PlatformKeyIndexer, l *logger.Logger) *FileKeyManager {
 	return &FileKeyManager{
-		PlatformKeyIndexer: NewPlatformKeyIndexer(sdk),
+		PlatformKeyIndexer: index,
 		log:                l,
 		Default:            NewDefault(l),
 	}
@@ -33,11 +32,11 @@ func (m *FileKeyManager) Name() string {
 	return fileKeyManagerName
 }
 
-func (m *FileKeyManager) Decrypt(ctx context.Context, keyID trust.KeyIdentifier, ciphertext []byte, ephemeralPublicKey []byte) (trust.ProtectedKey, error) {
+func (m *FileKeyManager) Decrypt(ctx context.Context, keyID KeyIdentifier, ciphertext []byte, ephemeralPublicKey []byte) (ProtectedKey, error) {
 	kid := string(keyID)
 
 	// Get key.
-	keyDetails, err := m.FindKeyByID(ctx, trust.KeyIdentifier(kid))
+	keyDetails, err := m.FindKeyByID(ctx, KeyIdentifier(kid))
 	if err != nil {
 		return nil, err
 	}
@@ -98,4 +97,16 @@ func (m *FileKeyManager) Decrypt(ctx context.Context, keyID trust.KeyIdentifier,
 	}
 
 	return NewStandardUnwrappedKey(unwrappedDek), nil
+}
+
+func (m *FileKeyManager) DeriveKey(ctx context.Context, kasKID KeyIdentifier, ephemeralPublicKeyBytes []byte, curve elliptic.Curve) (ProtectedKey, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (m *FileKeyManager) GenerateECSessionKey(ctx context.Context, ephemeralPublicKey string) (Encapsulator, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (m *FileKeyManager) Close() {
+	// No resources to release in this implementation
 }

@@ -10,10 +10,11 @@ import (
 	"github.com/mitchellh/mapstructure"
 	kaspb "github.com/opentdf/platform/protocol/go/kas"
 	"github.com/opentdf/platform/protocol/go/kas/kasconnect"
-	"github.com/opentdf/platform/service/internal/security"
 	"github.com/opentdf/platform/service/kas/access"
+	"github.com/opentdf/platform/service/logger"
 	"github.com/opentdf/platform/service/pkg/config"
 	"github.com/opentdf/platform/service/pkg/serviceregistry"
+	"github.com/opentdf/platform/service/trust"
 )
 
 func OnConfigUpdate(p *access.Provider) serviceregistry.OnConfigUpdateHook {
@@ -57,16 +58,29 @@ func NewRegistration() *serviceregistry.Service[kasconnect.AccessServiceHandler]
 					panic(fmt.Errorf("invalid kas cfg [%v] %w", srp.Config, err))
 				}
 
-				if srp.OTDF.TrustKeyIndex == nil {
-					// Set up both the legacy CryptoProvider and the new SecurityProvider
-					spa := security.NewSecurityProviderAdapter(srp.OTDF.CryptoProvider)
-					p.KeyIndex = spa
-					p.KeyManager = spa
-					kasCfg.UpgradeMapToKeyring(srp.OTDF.CryptoProvider)
-				} else {
-					p.KeyIndex = srp.OTDF.TrustKeyIndex
-					p.KeyManager = srp.OTDF.TrustKeyManager
-				}
+				//if srp.OTDF.TrustKeyIndex == nil {
+				//	// Set up both the legacy CryptoProvider and the new SecurityProvider
+				//	spa := security.NewSecurityProviderAdapter(srp.OTDF.CryptoProvider)
+				//	p.KeyIndex = spa
+				//	p.KeyManager = spa
+				//	kasCfg.UpgradeMapToKeyring(srp.OTDF.CryptoProvider)
+				//} else {
+				//	p.KeyIndex = srp.OTDF.TrustKeyIndex
+				//	p.KeyManager = srp.OTDF.TrustKeyManager
+				//}
+
+				p.KeyIndex = trust.NewPlatformKeyIndexer(srp.SDK)
+				dks := trust.NewDelegatingKeyService(p.KeyIndex, srp.Logger)
+				dks.RegisterKeyManager("opentdf.io/file", func(index trust.KeyIndex, l *logger.Logger) (trust.KeyManager, error) {
+					var platformIndex *trust.PlatformKeyIndexer
+					var ok bool
+					platformIndex, ok = index.(*trust.PlatformKeyIndexer)
+					if !ok {
+						return nil, fmt.Errorf("key index is not a file key index")
+					}
+					return trust.NewFileKeyManager(platformIndex, l), nil
+				})
+				p.KeyManager = dks
 
 				p.URI = *kasURI
 				p.SDK = srp.SDK

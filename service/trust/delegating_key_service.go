@@ -5,14 +5,18 @@ import (
 	"crypto/elliptic"
 	"fmt"
 	"sync"
+
+	"github.com/opentdf/platform/service/logger"
 )
 
-type KeyManagerFactory func() (KeyManager, error)
+type KeyManagerFactory func(index KeyIndex, l *logger.Logger) (KeyManager, error)
 
 // DelegatingKeyService is a key service that multiplexes between key managers based on the key's mode.
 type DelegatingKeyService struct {
 	// Lookup key manager by mode for a given key identifier
 	index KeyIndex
+
+	log *logger.Logger
 
 	// Lazily create key managers based on their mode
 	managerFactories map[string]KeyManagerFactory
@@ -28,9 +32,10 @@ type DelegatingKeyService struct {
 	mutex sync.Mutex
 }
 
-func NewDelegatingKeyService(index KeyIndex) *DelegatingKeyService {
+func NewDelegatingKeyService(index KeyIndex, l *logger.Logger) *DelegatingKeyService {
 	return &DelegatingKeyService{
 		index:            index,
+		log:              l,
 		managerFactories: make(map[string]KeyManagerFactory),
 		managers:         make(map[string]KeyManager),
 	}
@@ -55,7 +60,7 @@ func (d *DelegatingKeyService) getKeyManager(name string) (KeyManager, error) {
 		return nil, fmt.Errorf("no key manager registered with name: %s", name)
 	}
 
-	manager, err := factory()
+	manager, err := factory(d.index, d.log)
 	if err != nil {
 		return nil, err
 	}
