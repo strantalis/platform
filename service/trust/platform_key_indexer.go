@@ -83,6 +83,10 @@ func (p *AsymKeyAdapter) Mode() string {
 	return mode
 }
 
+func (p *AsymKeyAdapter) KeyMode() policy.KeyMode {
+	return p.asymKey.GetKeyMode()
+}
+
 func (p *AsymKeyAdapter) GetProviderConfig() *policy.KeyProviderConfig {
 	return p.asymKey.GetProviderConfig()
 }

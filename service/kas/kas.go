@@ -71,14 +71,14 @@ func NewRegistration() *serviceregistry.Service[kasconnect.AccessServiceHandler]
 
 				p.KeyIndex = trust.NewPlatformKeyIndexer(srp.SDK, srp.Logger)
 				dks := trust.NewDelegatingKeyService(p.KeyIndex, srp.Logger)
-				dks.RegisterKeyManager("opentdf.io/file", func(index trust.KeyIndex, l *logger.Logger) (trust.KeyManager, error) {
+				dks.RegisterKeyManager("openbao", func(index trust.KeyIndex, l *logger.Logger) (trust.KeyManager, error) {
 					var platformIndex *trust.PlatformKeyIndexer
 					var ok bool
 					platformIndex, ok = index.(*trust.PlatformKeyIndexer)
 					if !ok {
 						return nil, fmt.Errorf("key index is not a file key index")
 					}
-					return trust.NewFileKeyManager(platformIndex, l), nil
+					return trust.NewBaoManager(platformIndex, l), nil
 				})
 				p.KeyManager = dks
 

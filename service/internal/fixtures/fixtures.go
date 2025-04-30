@@ -498,7 +498,7 @@ func (f *Fixtures) Provision() {
 		slog.Int64("kas_registry", kas),
 		slog.Int64("attribute_key_access_server", akas),
 		slog.Int64("attribute_value_key_access_server", avkas),
-		slog.Int64("public_keys", pk),
+		// slog.Int64("public_keys", pk),
 		//slog.Int64("value_key_map", vkm),
 		//slog.Int64("definition_key_map", dkm),
 		//slog.Int64("namespace_key_map", nkm),

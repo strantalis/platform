@@ -29,7 +29,7 @@ func NewRegistration(ns string, dbRegister serviceregistry.DBRegister) *servicer
 			ServiceDesc:    &keyMgmtProto.KeyManagementService_ServiceDesc,
 			ConnectRPCFunc: keyMgmtConnect.NewKeyManagementServiceHandler,
 			RegisterFunc: func(srp serviceregistry.RegistrationParams) (keyMgmtConnect.KeyManagementServiceHandler, serviceregistry.HandlerServer) {
-				cfg := policyconfig.GetSharedPolicyConfig(srp)
+				cfg, _ := policyconfig.GetSharedPolicyConfig(srp.Config)
 				ksvc := &Service{
 					dbClient: policydb.NewClient(srp.DBClient, srp.Logger, int32(cfg.ListRequestLimitMax), int32(cfg.ListRequestLimitDefault)),
 					logger:   srp.Logger,

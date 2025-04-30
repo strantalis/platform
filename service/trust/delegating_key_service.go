@@ -101,7 +101,7 @@ func (d *DelegatingKeyService) Name() string {
 }
 
 func (d *DelegatingKeyService) Decrypt(ctx context.Context, keyID KeyIdentifier, ciphertext []byte, ephemeralPublicKey []byte) (ProtectedKey, error) {
-	keyDetails, err := d.index.FindKeyByID(ctx, keyID)
+	keyDetails, err := d.index.FindKeyByID(context.Background(), keyID)
 	if err != nil {
 		return nil, err
 	}
