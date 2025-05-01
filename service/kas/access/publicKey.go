@@ -43,26 +43,23 @@ func (p *Provider) LegacyPublicKey(ctx context.Context, req *connect.Request[kas
 	var pem string
 	var err error
 
-	// Get the security provider
+	var keyDetails trust.KeyDetails
+	var kid string
 	idx := p.GetKeyIndex()
-	if idx == nil {
-		return nil, connect.NewError(connect.CodeInternal, errors.Join(ErrConfig, errors.New("configuration error")))
-	}
 
-	// Find the key ID
-	kid, err := p.lookupKid(ctx, algorithm)
-	if err != nil {
-		return nil, err
-	}
+	if p.KeyIndex == nil {
+		kid, err = p.lookupKid(ctx, algorithm)
+		if err != nil {
+			return nil, err
+		}
+		// Convert string KID to KeyIdentifier type
+		keyID := trust.KeyIdentifier(kid)
 
-	// Convert string KID to KeyIdentifier type
-	keyID := trust.KeyIdentifier(kid)
-
-	// Find the key by ID
-	keyDetails, err := idx.FindKeyByID(ctx, keyID)
-	if err != nil {
-		p.Logger.ErrorContext(ctx, "SecurityProvider.FindKeyByID failed", "err", err)
-		return nil, connect.NewError(connect.CodeInternal, errors.Join(ErrConfig, errors.New("configuration error")))
+		// Find the key by ID
+		keyDetails, err = idx.FindKeyByID(ctx, keyID)
+	} else {
+		keyDetails, err = idx.FindKeyByAlgorithm(ctx, algorithm, false)
+		kid = string(keyDetails.ID())
 	}
 
 	switch algorithm {
@@ -99,21 +96,25 @@ func (p *Provider) PublicKey(ctx context.Context, req *connect.Request[kaspb.Pub
 	}
 	fmt := req.Msg.GetFmt()
 
-	// Find the key ID
-	kid, err := p.lookupKid(ctx, algorithm)
-	if err != nil {
-		return nil, err
-	}
-
-	// Get the security provider
+	var keyDetails trust.KeyDetails
+	var err error
+	var kid string
 	idx := p.GetKeyIndex()
-	if idx == nil {
-		p.Logger.ErrorContext(ctx, "no security provider available")
-		return nil, connect.NewError(connect.CodeInternal, ErrInternal)
-	}
 
-	// Convert string KID to KeyIdentifier type
-	keyID := trust.KeyIdentifier(kid)
+	if p.KeyIndex == nil {
+		kid, err = p.lookupKid(ctx, algorithm)
+		if err != nil {
+			return nil, err
+		}
+		// Convert string KID to KeyIdentifier type
+		keyID := trust.KeyIdentifier(kid)
+
+		// Find the key by ID
+		keyDetails, err = idx.FindKeyByID(ctx, keyID)
+	} else {
+		keyDetails, err = idx.FindKeyByAlgorithm(ctx, algorithm, false)
+		kid = string(keyDetails.ID())
+	}
 
 	r := func(value, kid string, err error) (*connect.Response[kaspb.PublicKeyResponse], error) {
 		if errors.Is(err, security.ErrCertNotFound) {
@@ -131,10 +132,10 @@ func (p *Provider) PublicKey(ctx context.Context, req *connect.Request[kaspb.Pub
 	}
 
 	// Find the key by ID
-	keyDetails, err := idx.FindKeyByID(ctx, keyID)
-	if err != nil {
-		return r("", kid, err)
-	}
+	// keyDetails, err := idx.FindKeyByID(ctx, keyID)
+	// if err != nil {
+	// 	return r("", kid, err)
+	// }
 
 	switch algorithm {
 	case security.AlgorithmECP256R1:

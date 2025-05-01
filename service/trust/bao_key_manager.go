@@ -83,8 +83,12 @@ func (b *BaoManager) Decrypt(ctx context.Context, keyID KeyIdentifier, ciphertex
 	switch asymKey.KeyMode() {
 	case policy.KeyMode_KEY_MODE_LOCAL:
 		if asymKey.GetProviderConfig() != nil {
-			sec, err := b.client.Logical().Write("transit/decrypt/aes-gcm-key", map[string]interface{}{
-				"ciphertext": fmt.Sprintf("%s", baoKey.WrappedKey),
+			wk, err := base64.StdEncoding.DecodeString(baoKey.WrappedKey[:])
+			if err != nil {
+				return nil, fmt.Errorf("failed to decode wrapped key: %w", err)
+			}
+			sec, err := b.client.Logical().Write(fmt.Sprintf("transit/decrypt/%s", baoKey.KeyID), map[string]interface{}{
+				"ciphertext": fmt.Sprintf("%s", wk),
 			})
 			if err != nil {
 				return nil, err

@@ -2,8 +2,10 @@ package trust
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/opentdf/platform/protocol/go/policy"
 	"github.com/opentdf/platform/protocol/go/policy/kasregistry"
@@ -39,7 +41,24 @@ func NewPlatformKeyIndexer(sdk *sdk.SDK, l *logger.Logger) *PlatformKeyIndexer {
 }
 
 func (p *PlatformKeyIndexer) FindKeyByAlgorithm(ctx context.Context, algorithm string, includeLegacy bool) (KeyDetails, error) {
-	return nil, errors.New("not implemented")
+	req := &kasregistry.ListKeysRequest{
+		KeyAlgorithm: policy.Algorithm_ALGORITHM_RSA_2048,
+	}
+
+	resp, err := p.sdk.KeyAccessServerRegistry.ListKeys(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, key := range resp.GetKeys() {
+		if key.GetKeyStatus() == policy.KeyStatus_KEY_STATUS_ACTIVE {
+			return &AsymKeyAdapter{
+				asymKey: key,
+				log:     p.log,
+			}, nil
+		}
+	}
+	return nil, fmt.Errorf("no active key found for algorithm %s", algorithm)
 }
 
 func (p *PlatformKeyIndexer) FindKeyByID(ctx context.Context, id KeyIdentifier) (KeyDetails, error) {
@@ -113,22 +132,27 @@ func (p *AsymKeyAdapter) ExportPublicKey(ctx context.Context, format KeyType) (s
 	if !ok {
 		return "", errors.New("public key is not a string")
 	}
+	// Decode the base64-encoded public key
+	decodedPubKey, err := base64.StdEncoding.DecodeString(pubKey)
+	if err != nil {
+		return "", err
+	}
 
 	switch format {
 	case KeyTypeJWK:
 		// For JWK format (currently only supported for RSA)
 		if p.asymKey.GetKeyAlgorithm() == policy.Algorithm_ALGORITHM_RSA_2048 {
-			return d.RSAPublicKeyAsJSON(ctx, pubKey)
+			return d.RSAPublicKeyAsJSON(ctx, string(decodedPubKey))
 		}
 		// For EC keys, we return the public key in PEM format
-		jwkKey, err := convertPEMToJWK(pubKey)
+		jwkKey, err := convertPEMToJWK(string(decodedPubKey))
 		if err != nil {
 			return "", err
 		}
 
 		return jwkKey, nil
 	case KeyTypePKCS8:
-		return pubKey, nil
+		return string(decodedPubKey), nil
 	default:
 		return "", errors.New("unsupported key type")
 	}
