@@ -11,6 +11,13 @@ import (
 	"time"
 )
 
+const (
+	// SizeUnknown is a special value for AddHeader's size argument
+	// to indicate that the file size is not known at the time of header creation.
+	// The Data Descriptor will be used to record the size later.
+	SizeUnknown = -1
+)
+
 // https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT
 // https://rzymek.github.io/post/excel-zip64/
 // Overall .ZIP file format:
@@ -43,27 +50,31 @@ type WriteState int
 const (
 	Initial WriteState = iota
 	Appending
-	Finished
+	// Finished // This state is effectively replaced by calling CloseFileEntry
 )
 
 type FileInfo struct {
-	crc      uint32
-	size     int64
-	offset   int64
-	filename string
-	fileTime uint16
-	fileDate uint16
-	flag     uint16
+	filename          string
+	headerOffset      uint64 // Offset of the local file header
+	accumulatedSize   int64  // Actual size of the file data written so far
+	declaredSize      int64  // Size declared in AddHeader, or SizeUnknown
+	currentCRC32      uint32
+	fileTime          uint16
+	fileDate          uint16
+	flag              uint16
+	isSizeKnown       bool
+	useZip64ExtraField bool // True if this specific file needs a Zip64 extended info in its local header
 }
 
 type Writer struct {
-	writer                                io.Writer
-	currentOffset, lastOffsetCDFileHeader uint64
-	FileInfo
-	fileInfoEntries []FileInfo
-	writeState      WriteState
-	isZip64         bool
-	totalBytes      int64
+	writer                io.Writer
+	currentOffset         uint64 // Tracks global offset in the archive
+	lastOffsetCDFileHeader uint64
+	activeFileInfo        *FileInfo // Information about the file currently being written
+	fileInfoEntries       []FileInfo // Stores finalized FileInfo for central directory
+	writeState            WriteState
+	forceZip64            bool // True if zip64 is forced for the entire archive
+	totalBytes            int64
 }
 
 // NewWriter Create tdf3 writer instance.
@@ -79,182 +90,197 @@ func NewWriter(writer io.Writer) *Writer {
 	return &archiveWriter
 }
 
-// EnableZip64 Enable zip 64.
+// EnableZip64 Enable zip 64 for the entire archive.
 func (writer *Writer) EnableZip64() {
-	writer.isZip64 = true
+	writer.forceZip64 = true
 }
 
-// AddHeader set size of the file. calling this method means finished writing
-// the previous file and starting a new file.
+// AddHeader prepares to write a new file to the archive.
+// size is the size of the file. If the size is not known beforehand (e.g., for streaming),
+// pass SizeUnknown. In this case, a data descriptor will be written after the file data.
 func (writer *Writer) AddHeader(filename string, size int64) error {
-	if len(writer.FileInfo.filename) != 0 {
-		err := fmt.Errorf("writer: cannot add a new file until the current "+
-			"file write is not completed:%s", writer.FileInfo.filename)
-		return err
+	if writer.activeFileInfo != nil {
+		return fmt.Errorf("writer: previous file entry for '%s' must be closed with CloseFileEntry before starting a new one", writer.activeFileInfo.filename)
 	}
 
-	if !writer.isZip64 {
-		writer.isZip64 = size > zip64MagicVal
+	writer.activeFileInfo = &FileInfo{
+		filename:     filename,
+		declaredSize: size,
+		headerOffset: writer.currentOffset,
+		isSizeKnown:  size != SizeUnknown,
+		currentCRC32: crc32.Checksum([]byte(""), crc32.MakeTable(crc32.IEEE)),
+	}
+	writer.activeFileInfo.fileTime, writer.activeFileInfo.fileDate = writer.getTimeDateUnMSDosFormat()
+	writer.activeFileInfo.flag = 0x08 // Always use data descriptor for consistency
+
+	localFileHeader := LocalFileHeader{
+		Signature:           fileHeaderSignature,
+		Version:             zipVersion,
+		GeneralPurposeBitFlag: writer.activeFileInfo.flag,
+		CompressionMethod:   0, // no compression
+		LastModifiedTime:    writer.activeFileInfo.fileTime,
+		LastModifiedDate:    writer.activeFileInfo.fileDate,
+		Crc32:               0, // Will be in data descriptor
+		FilenameLength:      uint16(len(writer.activeFileInfo.filename)),
 	}
 
-	writer.writeState = Initial
-	writer.FileInfo.size = size
-	writer.FileInfo.filename = filename
+	fileNeedsZip64 := writer.forceZip64 || (writer.activeFileInfo.isSizeKnown && size >= zip64MagicVal) || (!writer.activeFileInfo.isSizeKnown && writer.forceZip64)
+	writer.activeFileInfo.useZip64ExtraField = fileNeedsZip64
 
-	return nil
-}
 
-// AddData Add data to the zip archive.
-func (writer *Writer) AddData(data []byte) error {
-	localFileHeader := LocalFileHeader{}
-	fileTime, fileDate := writer.getTimeDateUnMSDosFormat()
-
-	if writer.writeState == Initial { //nolint:nestif // pkzip is complicated
-		localFileHeader.Signature = fileHeaderSignature
-		localFileHeader.Version = zipVersion
-		// since payload is added by chunks we set General purpose bit flag to 0x08
-		localFileHeader.GeneralPurposeBitFlag = 0x08
-		localFileHeader.CompressionMethod = 0 // no compression
-		localFileHeader.LastModifiedTime = fileTime
-		localFileHeader.LastModifiedDate = fileDate
-		localFileHeader.Crc32 = 0
-
+	if fileNeedsZip64 {
+		localFileHeader.CompressedSize = zip64MagicVal   // Indicate Zip64 in local header
+		localFileHeader.UncompressedSize = zip64MagicVal // Indicate Zip64 in local header
+		localFileHeader.ExtraFieldLength = zip64ExtendedLocalInfoExtraFieldSize
+	} else {
+		// Sizes are 0 because they will be in the data descriptor
 		localFileHeader.CompressedSize = 0
 		localFileHeader.UncompressedSize = 0
 		localFileHeader.ExtraFieldLength = 0
-
-		if writer.isZip64 {
-			localFileHeader.CompressedSize = zip64MagicVal
-			localFileHeader.UncompressedSize = zip64MagicVal
-			localFileHeader.ExtraFieldLength = zip64ExtendedLocalInfoExtraFieldSize
-		}
-
-		localFileHeader.FilenameLength = uint16(len(writer.FileInfo.filename))
-
-		// write localFileHeader
-		buf := new(bytes.Buffer)
-		err := binary.Write(buf, binary.LittleEndian, localFileHeader)
-		if err != nil {
-			return fmt.Errorf("binary.Write failed: %w", err)
-		}
-
-		err = writer.writeData(buf.Bytes())
-		if err != nil {
-			return fmt.Errorf("io.Writer.Write failed: %w", err)
-		}
-
-		// write the file name
-		err = writer.writeData([]byte(writer.FileInfo.filename))
-		if err != nil {
-			return fmt.Errorf("io.Writer.Write failed: %w", err)
-		}
-
-		if writer.isZip64 {
-			zip64ExtendedLocalInfoExtraField := Zip64ExtendedLocalInfoExtraField{}
-			zip64ExtendedLocalInfoExtraField.Signature = zip64ExternalID
-			zip64ExtendedLocalInfoExtraField.Size = zip64ExtendedLocalInfoExtraFieldSize - 4
-			zip64ExtendedLocalInfoExtraField.OriginalSize = uint64(writer.FileInfo.size)
-			zip64ExtendedLocalInfoExtraField.CompressedSize = uint64(writer.FileInfo.size)
-
-			buf = new(bytes.Buffer)
-			err := binary.Write(buf, binary.LittleEndian, zip64ExtendedLocalInfoExtraField)
-			if err != nil {
-				return fmt.Errorf("binary.Write failed: %w", err)
-			}
-
-			err = writer.writeData(buf.Bytes())
-			if err != nil {
-				return fmt.Errorf("io.Writer.Write failed: %w", err)
-			}
-		}
-
-		writer.writeState = Appending
-
-		// calculate the initial crc
-		writer.FileInfo.crc = crc32.Checksum([]byte(""), crc32.MakeTable(crc32.IEEE))
-		writer.FileInfo.fileTime = fileTime
-		writer.FileInfo.fileDate = fileDate
 	}
 
-	// now write the contents
-	err := writer.writeData(data)
-	if err != nil {
+	// Write localFileHeader
+	buf := new(bytes.Buffer)
+	if err := binary.Write(buf, binary.LittleEndian, localFileHeader); err != nil {
+		return fmt.Errorf("binary.Write localFileHeader failed: %w", err)
+	}
+	if err := writer.writeData(buf.Bytes()); err != nil {
+		return fmt.Errorf("writer.writeData for localFileHeader failed: %w", err)
+	}
+	writer.currentOffset += uint64(localFileHeaderSize)
+
+	// Write the file name
+	if err := writer.writeData([]byte(writer.activeFileInfo.filename)); err != nil {
+		return fmt.Errorf("writer.writeData for filename failed: %w", err)
+	}
+	writer.currentOffset += uint64(len(writer.activeFileInfo.filename))
+
+	if fileNeedsZip64 {
+		zip64Extra := Zip64ExtendedLocalInfoExtraField{
+			Signature: zip64ExternalID,
+			Size:      zip64ExtendedLocalInfoExtraFieldSize - 4, // Size of this extra field block minus sig and size fields
+		}
+		if writer.activeFileInfo.isSizeKnown {
+			zip64Extra.OriginalSize = uint64(size)
+			zip64Extra.CompressedSize = uint64(size) // Assuming no compression
+		} else {
+			// Sizes are unknown, will be in data descriptor. ZIP spec says these should be present.
+			// Some interpretations suggest they could be zero if unknown, but safest to include them as per spec example for streaming.
+			// However, since we are using data descriptor, these values in local zip64 extra field are often ignored by readers.
+			// Let's use 0 to signify unknown here, as the central directory will hold the true values.
+			zip64Extra.OriginalSize = 0
+			zip64Extra.CompressedSize = 0
+		}
+
+		buf.Reset()
+		if err := binary.Write(buf, binary.LittleEndian, zip64Extra); err != nil {
+			return fmt.Errorf("binary.Write zip64ExtendedLocalInfoExtraField failed: %w", err)
+		}
+		if err := writer.writeData(buf.Bytes()); err != nil {
+			return fmt.Errorf("writer.writeData for zip64ExtendedLocalInfoExtraField failed: %w", err)
+		}
+		writer.currentOffset += uint64(zip64ExtendedLocalInfoExtraFieldSize)
+	}
+	writer.writeState = Appending
+	return nil
+}
+
+// AddData adds data to the current file in the zip archive.
+// AddHeader must be called before AddData.
+func (writer *Writer) AddData(data []byte) error {
+	if writer.activeFileInfo == nil {
+		return fmt.Errorf("writer: AddHeader must be called before AddData")
+	}
+	if writer.writeState != Appending {
+		return fmt.Errorf("writer: file entry is not in appending state; current file: %s", writer.activeFileInfo.filename)
+	}
+
+	if err := writer.writeData(data); err != nil {
 		return fmt.Errorf("io.Writer.Write failed: %w", err)
 	}
 
-	// calculate the crc32
-	writer.FileInfo.crc = crc32.Update(writer.FileInfo.crc,
-		crc32.MakeTable(crc32.IEEE), data)
-
-	// update the file size
-	writer.FileInfo.offset += int64(len(data))
-
-	// check if we reached end
-	if writer.FileInfo.offset >= writer.FileInfo.size {
-		writer.writeState = Finished
-
-		writer.FileInfo.offset = int64(writer.currentOffset)
-		writer.FileInfo.flag = 0x08
-
-		writer.fileInfoEntries = append(writer.fileInfoEntries, writer.FileInfo)
-	}
-
-	if writer.writeState == Finished { //nolint:nestif // pkzip is complicated
-		if writer.isZip64 {
-			zip64DataDescriptor := Zip64DataDescriptor{}
-			zip64DataDescriptor.Signature = dataDescriptorSignature
-			zip64DataDescriptor.Crc32 = writer.FileInfo.crc
-			zip64DataDescriptor.CompressedSize = uint64(writer.FileInfo.size)
-			zip64DataDescriptor.UncompressedSize = uint64(writer.FileInfo.size)
-
-			// write the data descriptor
-			buf := new(bytes.Buffer)
-			err := binary.Write(buf, binary.LittleEndian, zip64DataDescriptor)
-			if err != nil {
-				return fmt.Errorf("binary.Write failed: %w", err)
-			}
-
-			err = writer.writeData(buf.Bytes())
-			if err != nil {
-				return fmt.Errorf("io.Writer.Write failed: %w", err)
-			}
-
-			writer.currentOffset += localFileHeaderSize
-			writer.currentOffset += uint64(len(writer.FileInfo.filename))
-			writer.currentOffset += uint64(writer.FileInfo.size)
-			writer.currentOffset += zip64DataDescriptorSize
-			writer.currentOffset += zip64ExtendedLocalInfoExtraFieldSize
-		} else {
-			zip32DataDescriptor := Zip32DataDescriptor{}
-			zip32DataDescriptor.Signature = dataDescriptorSignature
-			zip32DataDescriptor.Crc32 = writer.FileInfo.crc
-			zip32DataDescriptor.CompressedSize = uint32(writer.FileInfo.size)
-			zip32DataDescriptor.UncompressedSize = uint32(writer.FileInfo.size)
-
-			// write the data descriptor
-			buf := new(bytes.Buffer)
-			err := binary.Write(buf, binary.LittleEndian, zip32DataDescriptor)
-			if err != nil {
-				return fmt.Errorf("binary.Write failed: %w", err)
-			}
-
-			err = writer.writeData(buf.Bytes())
-			if err != nil {
-				return fmt.Errorf("io.Writer.Write failed: %w", err)
-			}
-
-			writer.currentOffset += localFileHeaderSize
-			writer.currentOffset += uint64(len(writer.FileInfo.filename))
-			writer.currentOffset += uint64(writer.FileInfo.size)
-			writer.currentOffset += zip32DataDescriptorSize
-		}
-
-		// reset the current file info since we reached the total size of the file
-		writer.FileInfo = FileInfo{}
-	}
+	writer.activeFileInfo.currentCRC32 = crc32.Update(writer.activeFileInfo.currentCRC32, crc32.MakeTable(crc32.IEEE), data)
+	writer.activeFileInfo.accumulatedSize += int64(len(data))
+	writer.currentOffset += uint64(len(data))
 
 	return nil
 }
+
+// CloseFileEntry finalizes the current file entry by writing its data descriptor.
+// This must be called after all data for the current file has been written with AddData.
+func (writer *Writer) CloseFileEntry() error {
+	if writer.activeFileInfo == nil {
+		return fmt.Errorf("writer: no active file entry to close")
+	}
+	if writer.writeState != Appending {
+		return fmt.Errorf("writer: file entry is not in appending state to close; current file: %s", writer.activeFileInfo.filename)
+	}
+
+	// Finalize size if it was unknown
+	if !writer.activeFileInfo.isSizeKnown {
+		writer.activeFileInfo.declaredSize = writer.activeFileInfo.accumulatedSize
+	} else if writer.activeFileInfo.accumulatedSize != writer.activeFileInfo.declaredSize {
+		return fmt.Errorf("writer: accumulated size %d does not match declared size %d for file %s",
+			writer.activeFileInfo.accumulatedSize, writer.activeFileInfo.declaredSize, writer.activeFileInfo.filename)
+	}
+
+	actualSize := writer.activeFileInfo.accumulatedSize
+	fileNeedsZip64 := writer.forceZip64 || actualSize >= zip64MagicVal
+
+	if fileNeedsZip64 {
+		dataDescriptor := Zip64DataDescriptor{
+			Signature:        dataDescriptorSignature,
+			Crc32:            writer.activeFileInfo.currentCRC32,
+			CompressedSize:   uint64(actualSize),
+			UncompressedSize: uint64(actualSize),
+		}
+		buf := new(bytes.Buffer)
+		if err := binary.Write(buf, binary.LittleEndian, dataDescriptor); err != nil {
+			return fmt.Errorf("binary.Write Zip64DataDescriptor failed: %w", err)
+		}
+		if err := writer.writeData(buf.Bytes()); err != nil {
+			return fmt.Errorf("writer.writeData for Zip64DataDescriptor failed: %w", err)
+		}
+		writer.currentOffset += uint64(zip64DataDescriptorSize)
+	} else {
+		dataDescriptor := Zip32DataDescriptor{
+			Signature:        dataDescriptorSignature,
+			Crc32:            writer.activeFileInfo.currentCRC32,
+			CompressedSize:   uint32(actualSize),
+			UncompressedSize: uint32(actualSize),
+		}
+		buf := new(bytes.Buffer)
+		if err := binary.Write(buf, binary.LittleEndian, dataDescriptor); err != nil {
+			return fmt.Errorf("binary.Write Zip32DataDescriptor failed: %w", err)
+		}
+		if err := writer.writeData(buf.Bytes()); err != nil {
+			return fmt.Errorf("writer.writeData for Zip32DataDescriptor failed: %w", err)
+		}
+		writer.currentOffset += uint64(zip32DataDescriptorSize)
+	}
+
+	// Store finalized FileInfo for central directory
+	// Note: The 'offset' in FileInfo for central directory is the local header offset.
+	// The 'size' is the actual accumulated size.
+	finalizedInfo := FileInfo{
+		filename:     writer.activeFileInfo.filename,
+		headerOffset: writer.activeFileInfo.headerOffset,
+		accumulatedSize:  actualSize, // Store the actual size
+		declaredSize: writer.activeFileInfo.declaredSize, // Keep declared for reference, though accumulated is authoritative now
+		currentCRC32: writer.activeFileInfo.currentCRC32,
+		fileTime:     writer.activeFileInfo.fileTime,
+		fileDate:     writer.activeFileInfo.fileDate,
+		flag:         writer.activeFileInfo.flag,
+		isSizeKnown:  true, // Size is now known
+		useZip64ExtraField: writer.activeFileInfo.useZip64ExtraField || fileNeedsZip64, // It might need zip64 in CD even if local didn't, or vice-versa if size was unknown
+	}
+	writer.fileInfoEntries = append(writer.fileInfoEntries, finalizedInfo)
+	writer.activeFileInfo = nil // Reset active file info
+	writer.writeState = Initial // Ready for new header or finish
+
+	return nil
+}
+
 
 // Finish Finished adding all the files in zip archive.
 func (writer *Writer) Finish() (int64, error) {
@@ -352,127 +378,181 @@ func (writer *Writer) writeData(data []byte) error {
 
 // WriteCentralDirectory write central directory struct into archive.
 func (writer *Writer) writeCentralDirectory() error {
-	writer.lastOffsetCDFileHeader = writer.currentOffset
+	cdStartOffset := writer.currentOffset // Offset where the first CD header will be written
+	writer.lastOffsetCDFileHeader = writer.currentOffset // Keep track of end of CD for Zip64 EOCD record
 
-	for i := 0; i < len(writer.fileInfoEntries); i++ {
-		cdFileHeader := CDFileHeader{}
-		cdFileHeader.Signature = centralDirectoryHeaderSignature
-		cdFileHeader.VersionCreated = zipVersion
-		cdFileHeader.VersionNeeded = zipVersion
-		cdFileHeader.GeneralPurposeBitFlag = writer.fileInfoEntries[i].flag
-		cdFileHeader.CompressionMethod = 0 // No compression
-		cdFileHeader.LastModifiedTime = writer.fileInfoEntries[i].fileTime
-		cdFileHeader.LastModifiedDate = writer.fileInfoEntries[i].fileDate
+	for _, fileInfo := range writer.fileInfoEntries {
+		cdFileHeader := CDFileHeader{
+			Signature:              centralDirectoryHeaderSignature,
+			VersionCreated:         zipVersion,
+			VersionNeeded:          zipVersion,
+			GeneralPurposeBitFlag:  fileInfo.flag,
+			CompressionMethod:      0, // No compression
+			LastModifiedTime:       fileInfo.fileTime,
+			LastModifiedDate:       fileInfo.fileDate,
+			Crc32:                  fileInfo.currentCRC32,
+			FilenameLength:         uint16(len(fileInfo.filename)),
+			FileCommentLength:      0,
+			DiskNumberStart:        0,
+			InternalFileAttributes: 0,
+			ExternalFileAttributes: 0,
+		}
 
-		cdFileHeader.Crc32 = writer.fileInfoEntries[i].crc
-		cdFileHeader.FilenameLength = uint16(len(writer.fileInfoEntries[i].filename))
-		cdFileHeader.FileCommentLength = 0
+		isZip64Entry := writer.forceZip64 || fileInfo.accumulatedSize >= zip64MagicVal || fileInfo.headerOffset >= zip64MagicVal
 
-		cdFileHeader.DiskNumberStart = 0
-		cdFileHeader.InternalFileAttributes = 0
-		cdFileHeader.ExternalFileAttributes = 0
-
-		cdFileHeader.CompressedSize = uint32(writer.fileInfoEntries[i].size)
-		cdFileHeader.UncompressedSize = uint32(writer.fileInfoEntries[i].size)
-		cdFileHeader.LocalHeaderOffset = uint32(writer.fileInfoEntries[i].offset)
-		cdFileHeader.ExtraFieldLength = 0
-
-		if writer.isZip64 {
+		if isZip64Entry {
 			cdFileHeader.CompressedSize = zip64MagicVal
 			cdFileHeader.UncompressedSize = zip64MagicVal
 			cdFileHeader.LocalHeaderOffset = zip64MagicVal
 			cdFileHeader.ExtraFieldLength = zip64ExtendedInfoExtraFieldSize
+		} else {
+			cdFileHeader.CompressedSize = uint32(fileInfo.accumulatedSize)
+			cdFileHeader.UncompressedSize = uint32(fileInfo.accumulatedSize)
+			cdFileHeader.LocalHeaderOffset = uint32(fileInfo.headerOffset)
+			cdFileHeader.ExtraFieldLength = 0
 		}
 
-		// write central directory file header struct
+
+		// Write central directory file header struct
 		buf := new(bytes.Buffer)
-		err := binary.Write(buf, binary.LittleEndian, cdFileHeader)
-		if err != nil {
-			return fmt.Errorf("binary.Write failed: %w", err)
+		if err := binary.Write(buf, binary.LittleEndian, cdFileHeader); err != nil {
+			return fmt.Errorf("binary.Write CDFileHeader for %s failed: %w", fileInfo.filename, err)
 		}
-
-		err = writer.writeData(buf.Bytes())
-		if err != nil {
-			return fmt.Errorf("io.Writer.Write failed: %w", err)
+		if err := writer.writeData(buf.Bytes()); err != nil {
+			return fmt.Errorf("writer.writeData for CDFileHeader of %s failed: %w", fileInfo.filename, err)
 		}
+		writer.currentOffset += uint64(cdFileHeaderSize)
 
-		// write the filename
-		err = writer.writeData([]byte(writer.fileInfoEntries[i].filename))
-		if err != nil {
-			return fmt.Errorf("io.Writer.Write failed: %w", err)
+
+		// Write the filename
+		if err := writer.writeData([]byte(fileInfo.filename)); err != nil {
+			return fmt.Errorf("writer.writeData for filename in CD of %s failed: %w", fileInfo.filename, err)
 		}
+		writer.currentOffset += uint64(len(fileInfo.filename))
 
-		if writer.isZip64 {
-			zip64ExtendedInfoExtraField := Zip64ExtendedInfoExtraField{}
-			zip64ExtendedInfoExtraField.Signature = zip64ExternalID
-			zip64ExtendedInfoExtraField.Size = zip64ExtendedInfoExtraFieldSize - 4
-			zip64ExtendedInfoExtraField.OriginalSize = uint64(writer.fileInfoEntries[i].size)
-			zip64ExtendedInfoExtraField.CompressedSize = uint64(writer.fileInfoEntries[i].size)
-			zip64ExtendedInfoExtraField.LocalFileHeaderOffset = uint64(writer.fileInfoEntries[i].offset)
-
-			// write zip64 extended info extra field struct
-			buf = new(bytes.Buffer)
-			err := binary.Write(buf, binary.LittleEndian, zip64ExtendedInfoExtraField)
-			if err != nil {
-				return fmt.Errorf("binary.Write failed: %w", err)
+		if isZip64Entry {
+			zip64Extra := Zip64ExtendedInfoExtraField{
+				Signature:             zip64ExternalID,
+				Size:                  zip64ExtendedInfoExtraFieldSize - 4, // Size of this specific extra field part
+				OriginalSize:          uint64(fileInfo.accumulatedSize),
+				CompressedSize:        uint64(fileInfo.accumulatedSize), // Assuming no compression
+				LocalFileHeaderOffset: fileInfo.headerOffset,
+				// DiskStartNumber is not included as per spec for this field (it's 0 for this implementation)
 			}
 
-			err = writer.writeData(buf.Bytes())
-			if err != nil {
-				return fmt.Errorf("io.Writer.Write failed: %w", err)
+			buf.Reset()
+			if err := binary.Write(buf, binary.LittleEndian, zip64Extra); err != nil {
+				return fmt.Errorf("binary.Write Zip64ExtendedInfoExtraField for %s failed: %w", fileInfo.filename, err)
 			}
-		}
-
-		writer.lastOffsetCDFileHeader += cdFileHeaderSize
-		writer.lastOffsetCDFileHeader += uint64(len(writer.fileInfoEntries[i].filename))
-
-		if writer.isZip64 {
-			writer.lastOffsetCDFileHeader += zip64ExtendedInfoExtraFieldSize
+			if err := writer.writeData(buf.Bytes()); err != nil {
+				return fmt.Errorf("writer.writeData for Zip64ExtendedInfoExtraField of %s failed: %w", fileInfo.filename, err)
+			}
+			writer.currentOffset += uint64(zip64ExtendedInfoExtraFieldSize)
 		}
 	}
-
+	// After loop, writer.currentOffset is the offset of the end of the last CD entry (which is start of EOCD)
+	writer.lastOffsetCDFileHeader = writer.currentOffset // This is the start of EOCD / end of CD
+	writer.currentOffset = cdStartOffset // Reset currentOffset to the start of CD for EOCD calculations
 	return nil
 }
 
 // writeEndOfCentralDirectory write end of central directory struct into archive.
 func (writer *Writer) writeEndOfCentralDirectory() error {
-	if writer.isZip64 {
-		err := writer.WriteZip64EndOfCentralDirectory()
-		if err != nil {
-			return err
-		}
+	// currentOffset is currently start of CD, lastOffsetCDFileHeader is end of CD / start of EOCD
+	cdSize := writer.lastOffsetCDFileHeader - writer.currentOffset
+	cdStartActualOffset := writer.currentOffset // This is the actual starting offset of CD
 
-		err = writer.WriteZip64EndOfCentralDirectoryLocator()
-		if err != nil {
-			return err
+	archiveIsZip64 := writer.forceZip64
+	if !archiveIsZip64 {
+		for _, fi := range writer.fileInfoEntries {
+			if fi.accumulatedSize >= zip64MagicVal || fi.headerOffset >= zip64MagicVal {
+				archiveIsZip64 = true
+				break
+			}
+		}
+		if cdStartActualOffset >= zip64MagicVal || len(writer.fileInfoEntries) >= zip64EntriesMagicVal {
+			archiveIsZip64 = true
 		}
 	}
 
-	endOfCDRecord := EndOfCDRecord{}
-	endOfCDRecord.Signature = endOfCentralDirectorySignature
-	endOfCDRecord.DiskNumber = 0
-	endOfCDRecord.StartDiskNumber = 0
-	endOfCDRecord.CentralDirectoryOffset = uint32(writer.currentOffset)
-	endOfCDRecord.NumberOfCDRecordEntries = uint16(len(writer.fileInfoEntries))
-	endOfCDRecord.TotalCDRecordEntries = uint16(len(writer.fileInfoEntries))
-	endOfCDRecord.SizeOfCentralDirectory = uint32(writer.lastOffsetCDFileHeader - writer.currentOffset)
-	endOfCDRecord.CommentLength = 0
 
-	if writer.isZip64 {
-		endOfCDRecord.CentralDirectoryOffset = zip64MagicVal
+	if archiveIsZip64 {
+		// Write Zip64 EOCD Record
+		zip64EOCD := Zip64EndOfCDRecord{
+			Signature:                        zip64EndOfCDSignature,
+			RecordSize:                       zip64EndOfCDRecordSize - 12, // Size of record after this field
+			VersionMadeBy:                    zipVersion,
+			VersionToExtract:                 zipVersion,
+			DiskNumber:                       0,
+			StartDiskNumber:                  0,
+			NumberOfCDRecordEntries:          uint64(len(writer.fileInfoEntries)),
+			TotalCDRecordEntries:             uint64(len(writer.fileInfoEntries)),
+			CentralDirectorySize:             cdSize,
+			StartingDiskCentralDirectoryOffset: cdStartActualOffset,
+		}
+		buf := new(bytes.Buffer)
+		if err := binary.Write(buf, binary.LittleEndian, zip64EOCD); err != nil {
+			return fmt.Errorf("binary.Write Zip64EndOfCDRecord failed: %w", err)
+		}
+		if err := writer.writeData(buf.Bytes()); err != nil { // This writeData advances the *global* totalBytes
+			return fmt.Errorf("writer.writeData for Zip64EndOfCDRecord failed: %w", err)
+		}
+		offsetOfZip64EOCD := writer.lastOffsetCDFileHeader // Zip64 EOCD record is written after CD
+		writer.lastOffsetCDFileHeader += uint64(zip64EndOfCDRecordSize) // Update offset to point after Zip64 EOCD
+
+		// Write Zip64 EOCD Locator
+		zip64Locator := Zip64EndOfCDRecordLocator{
+			Signature:       zip64EndOfCDLocatorSignature,
+			CDStartDiskNumber: 0,
+			CDOffset:        offsetOfZip64EOCD, // Offset of the Zip64 EOCD Record
+			NumberOfDisks:   1,
+		}
+		buf.Reset()
+		if err := binary.Write(buf, binary.LittleEndian, zip64Locator); err != nil {
+			return fmt.Errorf("binary.Write Zip64EndOfCDRecordLocator failed: %w", err)
+		}
+		if err := writer.writeData(buf.Bytes()); err != nil {
+			return fmt.Errorf("writer.writeData for Zip64EndOfCDRecordLocator failed: %w", err)
+		}
+		writer.lastOffsetCDFileHeader += uint64(zip64EndOfCDLocatorSize) // Update offset to point after Zip64 EOCD Locator
 	}
 
-	// write the end of central directory record struct
+	// Write standard EndOfCDRecord
+	eocd := EndOfCDRecord{
+		Signature:             endOfCentralDirectorySignature,
+		DiskNumber:            0,
+		StartDiskNumber:       0,
+		CommentLength:         0,
+	}
+	if archiveIsZip64 || len(writer.fileInfoEntries) >= zip64EntriesMagicVal {
+		eocd.NumberOfCDRecordEntries = zip64EntriesMagicVal
+		eocd.TotalCDRecordEntries = zip64EntriesMagicVal
+	} else {
+		eocd.NumberOfCDRecordEntries = uint16(len(writer.fileInfoEntries))
+		eocd.TotalCDRecordEntries = uint16(len(writer.fileInfoEntries))
+	}
+
+	if archiveIsZip64 || cdSize >= zip64MagicVal {
+		eocd.SizeOfCentralDirectory = zip64MagicVal
+	} else {
+		eocd.SizeOfCentralDirectory = uint32(cdSize)
+	}
+
+	if archiveIsZip64 || cdStartActualOffset >= zip64MagicVal {
+		eocd.CentralDirectoryOffset = zip64MagicVal
+	} else {
+		eocd.CentralDirectoryOffset = uint32(cdStartActualOffset)
+	}
+
 	buf := new(bytes.Buffer)
-	err := binary.Write(buf, binary.LittleEndian, endOfCDRecord)
-	if err != nil {
-		return fmt.Errorf("binary.Write failed: %w", err)
+	if err := binary.Write(buf, binary.LittleEndian, eocd); err != nil {
+		return fmt.Errorf("binary.Write EndOfCDRecord failed: %w", err)
 	}
-
-	err = writer.writeData(buf.Bytes())
-	if err != nil {
-		return fmt.Errorf("io.Writer.Write failed: %w", err)
+	if err := writer.writeData(buf.Bytes()); err != nil {
+		return fmt.Errorf("writer.writeData for EndOfCDRecord failed: %w", err)
 	}
+	// writer.lastOffsetCDFileHeader is already past Zip64 structures if they were written.
+	// This standard EOCD is the last thing.
 
 	return nil
 }
