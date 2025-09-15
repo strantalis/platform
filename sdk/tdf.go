@@ -350,8 +350,12 @@ func (s SDK) CreateTDFContext(ctx context.Context, writer io.Writer, reader io.R
 	if err != nil {
 		return nil, fmt.Errorf("json.Marshal failed:%w", err)
 	}
+	var indices []int
+	for i := range len(tdfObject.manifest.Segments) {
+		indices = append(indices, i)
+	}
 
-	finalBytes, err := tdfWriter.Finalize(ctx, manifestAsStr)
+	finalBytes, err := tdfWriter.Finalize(ctx, manifestAsStr, indices)
 	if err != nil {
 		return nil, fmt.Errorf("tdfWriter.Finalize failed: %w", err)
 	}

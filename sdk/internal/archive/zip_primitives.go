@@ -79,11 +79,13 @@ func (sm *SegmentMetadata) AddSegment(index int, _ []byte, originalSize uint64, 
 }
 
 // IsComplete returns true if all expected segments have been processed
-func (sm *SegmentMetadata) IsComplete() bool {
-    if sm.ExpectedCount <= 0 {
-        return false
-    }
-    return sm.presentCount == sm.ExpectedCount
+func (sm *SegmentMetadata) IsComplete(indices []int) bool {
+	for _, idx := range indices {
+		if _, exists := sm.Segments[idx]; !exists {
+			return false
+		}
+	}
+	return true
 }
 
 // GetMissingSegments returns a list of missing segment indices
@@ -101,14 +103,14 @@ func (sm *SegmentMetadata) GetMissingSegments() []int {
 func (sm *SegmentMetadata) GetTotalCRC32() uint32 { return sm.TotalCRC32 }
 
 // FinalizeCRC computes the total CRC32 by combining per-segment CRCs in index order.
-func (sm *SegmentMetadata) FinalizeCRC() {
+func (sm *SegmentMetadata) FinalizeCRC(indices []int) {
     if sm.ExpectedCount <= 0 {
         sm.TotalCRC32 = 0
         return
     }
     var total uint32 = 0
     var initialized bool
-    for i := 0; i < sm.ExpectedCount; i++ {
+		for _, i := range indices {
         seg, ok := sm.Segments[i]
         if !ok {
             // Incomplete; leave TotalCRC32 as zero

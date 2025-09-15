@@ -399,115 +399,14 @@ func (w *Writer) Finalize(ctx context.Context, opts ...Option[*WriterFinalizeCon
 	//     maxIndexToUse = K
 	// }
 	//
-	manifest := &Manifest{
-		TDFVersion: TDFSpecVersion,
-		Payload: Payload{
-			MimeType:    cfg.payloadMimeType,
-			Protocol:    tdfAsZip,
-			Type:        tdfZipReference,
-			URL:         archive.TDFPayloadFileName,
-			IsEncrypted: true,
-		},
-	}
 
-	// Generate splits using the splitter
-	splitter := keysplit.NewXORSplitter(keysplit.WithDefaultKAS(cfg.defaultKas))
-	result, err := splitter.GenerateSplits(ctx, cfg.attributes, w.dek)
-	if err != nil {
-		return nil, err
-	}
-
-	// Build key access objects from the splits
-	policyBytes, err := buildPolicy(cfg.attributes)
-	if err != nil {
-		return nil, err
-	}
-
-	encryptInfo := EncryptionInformation{
-		KeyAccessType: kSplitKeyType,
-		Policy:        string(ocrypto.Base64Encode(policyBytes)),
-		Method: Method{
-			Algorithm:    kGCMCipherAlgorithm,
-			IsStreamable: true,
-		},
-		IntegrityInformation: IntegrityInformation{
-			// Copy segments to manifest for integrity verification
-			Segments:      make([]Segment, len(cfg.keepSegments)),
-			RootSignature: RootSignature{},
-		},
-	}
-
-	// Copy segments to manifest in proper order (map -> slice)
-	for _, i := range cfg.keepSegments {
-		if segment, exists := w.segments[i]; exists {
-			encryptInfo.IntegrityInformation.Segments[i] = segment
-		}
-	}
-
-	// Set default segment sizes for reader compatibility
-	// Use the first segment as the default (streaming TDFs have variable segment sizes)
-	if firstSegment, exists := w.segments[0]; exists {
-		encryptInfo.IntegrityInformation.DefaultSegmentSize = firstSegment.Size
-		encryptInfo.IntegrityInformation.DefaultEncryptedSegSize = firstSegment.EncryptedSize
-	}
-
-	// Set segment hash algorithm
-	encryptInfo.IntegrityInformation.SegmentHashAlgorithm = w.segmentIntegrityAlgorithm.String()
-
-	var aggregateHash bytes.Buffer
-	// Calculate totals and iterate through segments in order (0 to maxIndexToUse)
-	var totalPlaintextSize, totalEncryptedSize int64
-	for _, i := range cfg.keepSegments {
-		segment, exists := w.segments[i]
-		if !exists {
-			return nil, fmt.Errorf("segment %d not written; cannot finalize a contiguous prefix with gaps", i)
-		}
-		if segment.Hash != "" {
-			// Accumulate sizes for result
-			totalPlaintextSize += segment.Size
-			totalEncryptedSize += segment.EncryptedSize
-
-			// Decode the base64-encoded segment hash to match reader validation
-			decodedHash, err := ocrypto.Base64Decode([]byte(segment.Hash))
-			if err != nil {
-				return nil, fmt.Errorf("failed to decode segment hash: %w", err)
-			}
-			aggregateHash.Write(decodedHash)
-			continue
-		}
-		return nil, errors.New("empty segment hash")
-	}
-
-	rootSignature, err := calculateSignature(aggregateHash.Bytes(), w.dek, w.integrityAlgorithm, false)
-	if err != nil {
-		return nil, err
-	}
-	encryptInfo.RootSignature = RootSignature{
-		Algorithm: w.integrityAlgorithm.String(),
-		Signature: string(ocrypto.Base64Encode([]byte(rootSignature))),
-	}
-
-	keyAccessList, err := buildKeyAccessObjects(result, policyBytes, cfg.encryptedMetadata)
-	if err != nil {
-		return nil, err
-	}
-
-	encryptInfo.KeyAccessObjs = keyAccessList
-	manifest.EncryptionInformation = encryptInfo
-
-	signedAssertions, err := w.buildAssertions(aggregateHash.Bytes(), cfg.assertions)
-	if err != nil {
-		return nil, err
-	}
-
-	manifest.Assertions = signedAssertions
-
+	manifest, totalPlaintextSize, totalEncryptedSize, err := w.getManifest(ctx, cfg)
 	manifestBytes, err := json.Marshal(manifest)
 	if err != nil {
 		return nil, err
 	}
 
-	finalBytes, err := w.archiveWriter.Finalize(ctx, manifestBytes)
+	finalBytes, err := w.archiveWriter.Finalize(ctx, manifestBytes, cfg.keepSegments)
 	if err != nil {
 		return nil, err
 	}
@@ -540,22 +439,33 @@ func (w *Writer) Finalize(ctx context.Context, opts ...Option[*WriterFinalizeCon
 //
 // No logging is performed; callers should consult this documentation for
 // the caveat about pre-finalize state.
-func (w *Writer) GetManifest() *Manifest {
+func (w *Writer) GetManifest(ctx context.Context, opts ...Option[*WriterFinalizeConfig]) (*Manifest, error) {
 	w.mutex.RLock()
 	defer w.mutex.RUnlock()
-
-	// If already finalized and we have the final manifest, return a copy.
-	if w.finalized && w.manifest != nil {
-		return cloneManifest(w.manifest)
+	cfg := &WriterFinalizeConfig{
+		attributes:        make([]*policy.Value, 0),
+		encryptedMetadata: "",
+		payloadMimeType:   "application/octet-stream",
+	}
+	for _, opt := range opts {
+		opt(cfg)
+	}
+	if len(cfg.attributes) == 0 && len(w.initialAttributes) > 0 {
+		cfg.attributes = w.initialAttributes
+	}
+	if cfg.defaultKas == nil && w.initialDefaultKAS != nil {
+		cfg.defaultKas = w.initialDefaultKAS
 	}
 
-	// Build a stub manifest from current state. This intentionally omits
-	// KeyAccess objects, assertions, and root signature which are set
-	// during finalization.
-	m := &Manifest{
+	m, _,_, err := w.getManifest(ctx, cfg)
+	return m, err
+}
+
+func (w *Writer) getManifest(ctx context.Context, cfg *WriterFinalizeConfig) (*Manifest, int64, int64, error) {
+	manifest := &Manifest{
 		TDFVersion: TDFSpecVersion,
 		Payload: Payload{
-			MimeType:    "application/octet-stream",
+			MimeType:    cfg.payloadMimeType,
 			Protocol:    tdfAsZip,
 			Type:        tdfZipReference,
 			URL:         archive.TDFPayloadFileName,
@@ -563,55 +473,98 @@ func (w *Writer) GetManifest() *Manifest {
 		},
 	}
 
-	enc := EncryptionInformation{
+	// Generate splits using the splitter
+	splitter := keysplit.NewXORSplitter(keysplit.WithDefaultKAS(cfg.defaultKas))
+	result, err := splitter.GenerateSplits(ctx, cfg.attributes, w.dek)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+
+	// Build key access objects from the splits
+	policyBytes, err := buildPolicy(cfg.attributes)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+
+	encryptInfo := EncryptionInformation{
 		KeyAccessType: kSplitKeyType,
+		Policy:        string(ocrypto.Base64Encode(policyBytes)),
 		Method: Method{
 			Algorithm:    kGCMCipherAlgorithm,
 			IsStreamable: true,
 		},
 		IntegrityInformation: IntegrityInformation{
-			Segments: make([]Segment, 0),
+			// Copy segments to manifest for integrity verification
+			Segments:      make([]Segment, len(cfg.keepSegments)),
+			RootSignature: RootSignature{},
 		},
 	}
 
-	// If initial attributes were provided at writer creation, include a
-	// provisional policy derived from them. This is informational only and
-	// may change upon Finalize based on finalize-time options.
-	if len(w.initialAttributes) > 0 {
-		if policyBytes, err := buildPolicy(w.initialAttributes); err == nil {
-			enc.Policy = string(ocrypto.Base64Encode(policyBytes))
+	// Copy segments to manifest in proper order (map -> slice)
+	for idx, i := range cfg.keepSegments {
+		if segment, exists := w.segments[i]; exists {
+			encryptInfo.IntegrityInformation.Segments[idx] = segment
 		}
 	}
 
-	// Populate segment integrity info from what we have so far.
-	if len(w.segments) > 0 {
-		// Find the highest written index so far
-		maxIdx := 0
-		for i := range w.segments {
-			if i > maxIdx {
-				maxIdx = i
+	// Set default segment sizes for reader compatibility
+	// Use the first segment as the default (streaming TDFs have variable segment sizes)
+	if firstSegment, exists := w.segments[0]; exists {
+		encryptInfo.IntegrityInformation.DefaultSegmentSize = firstSegment.Size
+		encryptInfo.IntegrityInformation.DefaultEncryptedSegSize = firstSegment.EncryptedSize
+	}
+
+	// Set segment hash algorithm
+	encryptInfo.IntegrityInformation.SegmentHashAlgorithm = w.segmentIntegrityAlgorithm.String()
+
+	var aggregateHash bytes.Buffer
+	// Calculate totals and iterate through segments in order (0 to maxIndexToUse)
+	var totalPlaintextSize, totalEncryptedSize int64
+	for _, i := range cfg.keepSegments {
+		segment, exists := w.segments[i]
+		if !exists {
+			return nil, 0, 0, fmt.Errorf("segment %d not written; cannot finalize a contiguous prefix with gaps", i)
+		}
+		if segment.Hash != "" {
+			// Accumulate sizes for result
+			totalPlaintextSize += segment.Size
+			totalEncryptedSize += segment.EncryptedSize
+
+			// Decode the base64-encoded segment hash to match reader validation
+			decodedHash, err := ocrypto.Base64Decode([]byte(segment.Hash))
+			if err != nil {
+				return nil,0,0, fmt.Errorf("failed to decode segment hash: %w", err)
 			}
+			aggregateHash.Write(decodedHash)
+			continue
 		}
-		segs := make([]Segment, maxIdx+1)
-		for i := 0; i <= maxIdx; i++ {
-			if s, ok := w.segments[i]; ok {
-				segs[i] = s
-			}
-		}
-		enc.IntegrityInformation.Segments = segs
+		return nil, 0,0,errors.New("empty segment hash")
 	}
 
-	// Default sizes from first segment if present.
-	if first, ok := w.segments[0]; ok {
-		enc.IntegrityInformation.DefaultSegmentSize = first.Size
-		enc.IntegrityInformation.DefaultEncryptedSegSize = first.EncryptedSize
+	rootSignature, err := calculateSignature(aggregateHash.Bytes(), w.dek, w.integrityAlgorithm, false)
+	if err != nil {
+		return nil, 0,0,err
+	}
+	encryptInfo.RootSignature = RootSignature{
+		Algorithm: w.integrityAlgorithm.String(),
+		Signature: string(ocrypto.Base64Encode([]byte(rootSignature))),
 	}
 
-	// Set the hash algorithm used for segments.
-	enc.IntegrityInformation.SegmentHashAlgorithm = w.segmentIntegrityAlgorithm.String()
+	keyAccessList, err := buildKeyAccessObjects(result, policyBytes, cfg.encryptedMetadata)
+	if err != nil {
+		return nil,0,0, err
+	}
 
-	m.EncryptionInformation = enc
-	return m
+	encryptInfo.KeyAccessObjs = keyAccessList
+	manifest.EncryptionInformation = encryptInfo
+
+	signedAssertions, err := w.buildAssertions(aggregateHash.Bytes(), cfg.assertions)
+	if err != nil {
+		return nil, 0,0,err
+	}
+
+	manifest.Assertions = signedAssertions
+	return manifest, totalPlaintextSize, totalEncryptedSize, nil
 }
 
 // cloneManifest makes a shallow-deep copy of a Manifest to avoid callers

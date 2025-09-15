@@ -21,7 +21,7 @@ type Writer interface {
 type SegmentWriter interface {
     Writer
     WriteSegment(ctx context.Context, index int, data []byte) ([]byte, error)
-    Finalize(ctx context.Context, manifest []byte) ([]byte, error)
+    Finalize(ctx context.Context, manifest []byte, indices []int) ([]byte, error)
     // CleanupSegment removes the presence marker for a segment index.
     // Calling this before Finalize will cause IsComplete() to fail for that index.
     CleanupSegment(index int) error
