@@ -32,6 +32,7 @@ func createSplitPlan(expr *BooleanExpression, defaultKAS string) ([]SplitAssignm
 		return createDefaultSplitPlan(defaultKAS), nil
 	}
 
+	fmt.Println("here?")
 	// Optimize the split assignments (remove duplicates, merge compatible splits)
 	optimized := optimizeSplitAssignments(assignments)
 
