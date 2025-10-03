@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -55,7 +56,7 @@ func (m *mockKASWithRewrap) Rewrap(_ context.Context, in *connect.Request[kas.Re
 	signedRequestToken := in.Msg.GetSignedRequestToken()
 
 	// Debug: Log the token format for troubleshooting
-	fmt.Printf("DEBUG: Received signed request token: %q\n", signedRequestToken) //nolint:forbidigo // for testing
+	slog.Debug("Received signed request token:", "srt", signedRequestToken) //nolint:forbidigo // for testing
 
 	token, err := jwt.ParseInsecure([]byte(signedRequestToken))
 	if err != nil {
@@ -329,7 +330,8 @@ func TestStreamingWriter_WithSegments_And_GetManifest(t *testing.T) {
 	require.NoError(t, err)
 
 	// Pre-finalize manifest should be available
-	m := w.GetManifest()
+	m, err := w.GetManifest(t.Context())
+	require.NoError(t, err)
 	require.NotNil(t, m)
 
 	// Finalize keeping contiguous prefix [0,1]

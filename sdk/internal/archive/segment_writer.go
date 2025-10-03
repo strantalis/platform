@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
 	"sort"
 	"sync"
@@ -138,7 +139,10 @@ func (sw *segmentWriter) Finalize(ctx context.Context, manifest []byte) ([]byte,
 			order = append(order, idx)
 		}
 		sort.Ints(order)
-		_ = sw.metadata.SetOrder(order)
+		if err := sw.metadata.SetOrder(order); err != nil {
+			// This should be an unreachable state, but handle it defensively.
+			return nil, &Error{Op: "finalize", Type: "segment", Err: fmt.Errorf("internal error setting segment order: %w", err)}
+		}
 	}
 
 	// Verify all segments are present
@@ -221,11 +225,7 @@ func (sw *segmentWriter) Finalize(ctx context.Context, manifest []byte) ([]byte,
 
 	sw.finalized = true
 
-	// Return the final bytes
-	result := make([]byte, buffer.Len())
-	copy(result, buffer.Bytes())
-
-	return result, nil
+	return buffer.Bytes(), nil
 }
 
 // CleanupSegment removes the presence marker for a segment index. Since payload

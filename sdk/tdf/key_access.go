@@ -12,6 +12,19 @@ import (
 	"github.com/opentdf/platform/sdk/tdf/keysplit"
 )
 
+var tdfSaltBytes []byte
+
+// tdfSalt generates the standard TDF salt for key derivation
+func init() {
+    digest := sha256.New()
+    digest.Write([]byte("TDF"))
+    tdfSaltBytes = digest.Sum(nil)
+}
+
+func tdfSalt() []byte {
+    return tdfSaltBytes
+}
+
 // BuildKeyAccessObjects creates KeyAccess objects from splits for TDF manifest inclusion
 func buildKeyAccessObjects(result *keysplit.SplitResult, policyBytes []byte, metadata string) ([]KeyAccess, error) {
 	if result == nil || len(result.Splits) == 0 {
@@ -229,11 +242,4 @@ func wrapKeyWithRSA(kasPublicKeyPEM string, symKey []byte) (string, error) {
 	}
 
 	return string(ocrypto.Base64Encode(encryptedKey)), nil
-}
-
-// tdfSalt generates the standard TDF salt for key derivation
-func tdfSalt() []byte {
-	digest := sha256.New()
-	digest.Write([]byte("TDF"))
-	return digest.Sum(nil)
 }
