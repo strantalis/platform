@@ -82,7 +82,8 @@ func testGetManifestIncludesInitialPolicy(t *testing.T) {
 	require.NoError(t, err)
 
 	// Pre-finalize manifest should include policy derived from initial attributes
-	m := writer.GetManifest()
+	m, err := writer.GetManifest(t.Context())
+	require.NoError(t, err)
 	require.NotNil(t, m)
 	require.NotEmpty(t, m.EncryptionInformation.Policy, "expected provisional policy in stub manifest")
 
@@ -1002,7 +1003,8 @@ func testGetManifestBeforeAndAfterFinalize(t *testing.T) {
 	require.NoError(t, err)
 
 	// Before writing any segment, stub manifest should still be available
-	m0 := writer.GetManifest()
+	m0, err := writer.GetManifest(t.Context())
+	require.NoError(t, err)
 	require.NotNil(t, m0)
 	assert.Equal(t, TDFSpecVersion, m0.TDFVersion)
 	assert.Equal(t, tdfAsZip, m0.Payload.Protocol)
@@ -1016,7 +1018,8 @@ func testGetManifestBeforeAndAfterFinalize(t *testing.T) {
 	_, err = writer.WriteSegment(ctx, 0, data)
 	require.NoError(t, err)
 
-	m1 := writer.GetManifest()
+	m1, err := writer.GetManifest(t.Context())
+	require.NoError(t, err)
 	require.NotNil(t, m1)
 	// Should reflect first segment defaults and sizes
 	assert.Len(t, m1.EncryptionInformation.Segments, 1)
@@ -1030,7 +1033,8 @@ func testGetManifestBeforeAndAfterFinalize(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, fin.Manifest)
 
-	m2 := writer.GetManifest()
+	m2, err := writer.GetManifest(t.Context())
+	require.NoError(t, err)
 	// Expect at least one key access and a root signature after finalize
 	assert.GreaterOrEqual(t, len(m2.EncryptionInformation.KeyAccessObjs), 1)
 	assert.NotEmpty(t, m2.EncryptionInformation.RootSignature.Signature)
