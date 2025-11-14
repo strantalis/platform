@@ -53,6 +53,16 @@ type WriterConfig struct {
 	// segmentIntegrityAlgorithm specifies the algorithm for segment-level integrity
 	segmentIntegrityAlgorithm IntegrityAlgorithm
 
+	// cryptoProvider supplies all cryptographic primitives used by the writer.
+	// When nil, the writer will fall back to the default Go implementation.
+	cryptoProvider CryptoProvider
+
+	// entropySource allows callers to override only the randomness source while
+	// keeping other crypto operations handled by the default provider. When
+	// specified alongside a custom CryptoProvider, the explicit provider takes
+	// precedence.
+	entropySource EntropySource
+
 	// initialAttributes allows callers to provide attribute values at writer creation time.
 	// These will be used during Finalize() if no attributes are provided there.
 	initialAttributes []*policy.Value
@@ -141,6 +151,27 @@ func WithInitialAttributes(values []*policy.Value) Option[*WriterConfig] {
 func WithDefaultKASForWriter(kas *policy.SimpleKasKey) Option[*WriterConfig] {
 	return func(c *WriterConfig) {
 		c.initialDefaultKAS = kas
+	}
+}
+
+// WithCryptoProvider injects a custom CryptoProvider implementation that the
+// writer will use for all cryptographic operations. This enables delegating
+// crypto to external runtimes (for example WASM hosts) or swapping in
+// instrumentation for testing.
+func WithCryptoProvider(provider CryptoProvider) Option[*WriterConfig] {
+	return func(c *WriterConfig) {
+		c.cryptoProvider = provider
+	}
+}
+
+// WithEntropySource overrides the entropy source used by the default provider.
+// This is useful when deterministic randomness or host-supplied randomness is
+// needed without implementing the full CryptoProvider interface. When used
+// together with WithCryptoProvider, the explicit provider controls entropy as
+// well.
+func WithEntropySource(source EntropySource) Option[*WriterConfig] {
+	return func(c *WriterConfig) {
+		c.entropySource = source
 	}
 }
 

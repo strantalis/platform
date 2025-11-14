@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"log/slog"
 
-	"github.com/opentdf/platform/lib/ocrypto"
 	"github.com/opentdf/platform/sdk/experimental/tdf/keysplit"
 )
 
@@ -28,7 +27,7 @@ func tdfSalt() []byte {
 }
 
 // BuildKeyAccessObjects creates KeyAccess objects from splits for TDF manifest inclusion
-func buildKeyAccessObjects(result *keysplit.SplitResult, policyBytes []byte, metadata string) ([]KeyAccess, error) {
+func buildKeyAccessObjects(provider CryptoProvider, result *keysplit.SplitResult, policyBytes []byte, metadata string) ([]KeyAccess, error) {
 	if result == nil || len(result.Splits) == 0 {
 		return nil, errors.New("no splits provided")
 	}
@@ -36,7 +35,7 @@ func buildKeyAccessObjects(result *keysplit.SplitResult, policyBytes []byte, met
 	var keyAccessList []KeyAccess
 
 	// Create base64-encoded policy for binding
-	base64Policy := string(ocrypto.Base64Encode(policyBytes))
+	base64Policy := string(provider.Base64Encode(policyBytes))
 
 	for _, split := range result.Splits {
 		for _, kasURL := range split.KASURLs {
@@ -50,20 +49,23 @@ func buildKeyAccessObjects(result *keysplit.SplitResult, policyBytes []byte, met
 			}
 
 			// Create policy binding
-			policyBinding := createPolicyBinding(split.Data, base64Policy)
+			policyBinding, err := createPolicyBinding(provider, split.Data, base64Policy)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create policy binding for KAS %s: %w", kasURL, err)
+			}
 
 			// Encrypt metadata if provided
 			var encryptedMetadata string
 			if metadata != "" {
 				var err error
-				encryptedMetadata, err = encryptMetadata(split.Data, metadata)
+				encryptedMetadata, err = encryptMetadata(provider, split.Data, metadata)
 				if err != nil {
 					return nil, fmt.Errorf("failed to encrypt metadata for KAS %s: %w", kasURL, err)
 				}
 			}
 
 			// Encrypt the split key with KAS public key
-			wrappedKey, keyType, ephemeralPubKey, err := wrapKeyWithPublicKey(split.Data, pubKeyInfo)
+			wrappedKey, keyType, ephemeralPubKey, err := wrapKeyWithPublicKey(provider, split.Data, pubKeyInfo)
 			if err != nil {
 				return nil, fmt.Errorf("failed to wrap key for KAS %s: %w", kasURL, err)
 			}
@@ -107,9 +109,12 @@ func buildKeyAccessObjects(result *keysplit.SplitResult, policyBytes []byte, met
 }
 
 // createPolicyBinding creates an HMAC binding between the key and policy
-func createPolicyBinding(symKey []byte, base64PolicyObject string) any {
+func createPolicyBinding(provider CryptoProvider, symKey []byte, base64PolicyObject string) (any, error) {
 	// Create HMAC hash of the policy using the symmetric key
-	hmacHash := ocrypto.CalculateSHA256Hmac(symKey, []byte(base64PolicyObject))
+	hmacHash, err := provider.HMACSHA256(symKey, []byte(base64PolicyObject))
+	if err != nil {
+		return nil, fmt.Errorf("failed to compute policy binding hmac: %w", err)
+	}
 
 	// Convert to hex string
 	hashHex := hex.EncodeToString(hmacHash)
@@ -117,17 +122,16 @@ func createPolicyBinding(symKey []byte, base64PolicyObject string) any {
 	// Create policy binding structure
 	binding := PolicyBinding{
 		Alg:  kPolicyBindingAlg,
-		Hash: string(ocrypto.Base64Encode([]byte(hashHex))),
+		Hash: string(provider.Base64Encode([]byte(hashHex))),
 	}
 
-	// Return as any to match KeyAccess.PolicyBinding field
-	return binding
+	return binding, nil
 }
 
 // encryptMetadata encrypts TDF metadata using the split key
-func encryptMetadata(symKey []byte, metadata string) (string, error) {
+func encryptMetadata(provider CryptoProvider, symKey []byte, metadata string) (string, error) {
 	// Create AES-GCM cipher
-	gcm, err := ocrypto.NewAESGcm(symKey)
+	gcm, err := provider.NewAESGCM(symKey)
 	if err != nil {
 		return "", fmt.Errorf("failed to create AES-GCM: %w", err)
 	}
@@ -139,12 +143,16 @@ func encryptMetadata(symKey []byte, metadata string) (string, error) {
 	}
 
 	// Extract IV (first 12 bytes for GCM)
-	iv := encryptedBytes[:ocrypto.GcmStandardNonceSize]
+	const gcmStandardNonceSize = 12
+	if len(encryptedBytes) < gcmStandardNonceSize {
+		return "", errors.New("encrypted metadata too short for nonce extraction")
+	}
+	iv := encryptedBytes[:gcmStandardNonceSize]
 
 	// Create encrypted metadata structure
 	encMeta := EncryptedMetadata{
-		Cipher: string(ocrypto.Base64Encode(encryptedBytes)),
-		Iv:     string(ocrypto.Base64Encode(iv)),
+		Cipher: string(provider.Base64Encode(encryptedBytes)),
+		Iv:     string(provider.Base64Encode(iv)),
 	}
 
 	// Serialize to JSON and base64 encode
@@ -153,95 +161,27 @@ func encryptMetadata(symKey []byte, metadata string) (string, error) {
 		return "", fmt.Errorf("failed to marshal encrypted metadata: %w", err)
 	}
 
-	return string(ocrypto.Base64Encode(metadataJSON)), nil
+	return string(provider.Base64Encode(metadataJSON)), nil
 }
 
 // wrapKeyWithPublicKey encrypts a symmetric key with a KAS public key
-func wrapKeyWithPublicKey(symKey []byte, pubKeyInfo keysplit.KASPublicKey) (string, string, string, error) {
+func wrapKeyWithPublicKey(provider CryptoProvider, symKey []byte, pubKeyInfo keysplit.KASPublicKey) (string, string, string, error) {
 	if pubKeyInfo.PEM == "" {
 		return "", "", "", fmt.Errorf("public key PEM is empty for KAS %s", pubKeyInfo.URL)
 	}
 
-	// Determine key type based on algorithm
-	ktype := ocrypto.KeyType(pubKeyInfo.Algorithm)
-
-	if ocrypto.IsECKeyType(ktype) {
-		// Handle EC key wrapping
-		return wrapKeyWithEC(ktype, pubKeyInfo.PEM, symKey)
+	req := KeyWrapRequest{
+		Algorithm:    pubKeyInfo.Algorithm,
+		PublicKeyPEM: pubKeyInfo.PEM,
+		PlaintextKey: symKey,
+		Salt:         tdfSalt(),
 	}
-	// Handle RSA key wrapping
-	wrapped, err := wrapKeyWithRSA(pubKeyInfo.PEM, symKey)
-	return wrapped, "wrapped", "", err
-}
 
-// wrapKeyWithEC encrypts a key using EC public key with ECIES
-func wrapKeyWithEC(keyType ocrypto.KeyType, kasPublicKeyPEM string, symKey []byte) (string, string, string, error) {
-	// Convert key type to ECC mode
-	mode, err := ocrypto.ECKeyTypeToMode(keyType)
+	res, err := provider.WrapKey(req)
 	if err != nil {
-		return "", "", "", fmt.Errorf("failed to convert key type to ECC mode: %w", err)
+		return "", "", "", err
 	}
 
-	// Generate ephemeral key pair
-	ecKeyPair, err := ocrypto.NewECKeyPair(mode)
-	if err != nil {
-		return "", "", "", fmt.Errorf("failed to create EC key pair: %w", err)
-	}
-
-	// Get ephemeral public key in PEM format
-	ephemeralPubKey, err := ecKeyPair.PublicKeyInPemFormat()
-	if err != nil {
-		return "", "", "", fmt.Errorf("failed to get ephemeral public key: %w", err)
-	}
-
-	// Get ephemeral private key
-	ephemeralPrivKey, err := ecKeyPair.PrivateKeyInPemFormat()
-	if err != nil {
-		return "", "", "", fmt.Errorf("failed to get ephemeral private key: %w", err)
-	}
-
-	// Compute ECDH shared secret
-	ecdhKey, err := ocrypto.ComputeECDHKey([]byte(ephemeralPrivKey), []byte(kasPublicKeyPEM))
-	if err != nil {
-		return "", "", "", fmt.Errorf("failed to compute ECDH key: %w", err)
-	}
-
-	// Derive wrapping key using HKDF
-	salt := tdfSalt()
-	wrapKey, err := ocrypto.CalculateHKDF(salt, ecdhKey)
-	if err != nil {
-		return "", "", "", fmt.Errorf("failed to derive wrap key: %w", err)
-	}
-
-	// Ensure we have the right length for wrapping, trim if needed, or error if too short
-	if len(wrapKey) > len(symKey) {
-		wrapKey = wrapKey[:len(symKey)]
-	} else if len(wrapKey) < len(symKey) {
-		return "", "", "", fmt.Errorf("wrap key too short: got %d, expected at least %d",
-			len(wrapKey), len(symKey))
-	}
-
-	wrapped := make([]byte, len(symKey))
-	for i := range symKey {
-		wrapped[i] = symKey[i] ^ wrapKey[i]
-	}
-
-	return string(ocrypto.Base64Encode(wrapped)), "eccWrapped", ephemeralPubKey, nil
-}
-
-// wrapKeyWithRSA encrypts a key using RSA public key with OAEP padding
-func wrapKeyWithRSA(kasPublicKeyPEM string, symKey []byte) (string, error) {
-	// Create RSA encryptor from PEM
-	encryptor, err := ocrypto.FromPublicPEM(kasPublicKeyPEM)
-	if err != nil {
-		return "", fmt.Errorf("failed to create RSA encryptor: %w", err)
-	}
-
-	// Encrypt with OAEP padding
-	encryptedKey, err := encryptor.Encrypt(symKey)
-	if err != nil {
-		return "", fmt.Errorf("failed to RSA encrypt key: %w", err)
-	}
-
-	return string(ocrypto.Base64Encode(encryptedKey)), nil
+	wrapped := provider.Base64Encode(res.WrappedKey)
+	return string(wrapped), string(res.Scheme), res.EphemeralPublicKey, nil
 }

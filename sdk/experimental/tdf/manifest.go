@@ -5,8 +5,6 @@ package tdf
 import (
 	"encoding/hex"
 	"errors"
-
-	"github.com/opentdf/platform/lib/ocrypto"
 )
 
 const (
@@ -103,9 +101,12 @@ type EncryptedMetadata struct {
 	Iv     string `json:"iv"`
 }
 
-func calculateSignature(data []byte, secret []byte, alg IntegrityAlgorithm, isLegacyTDF bool) (string, error) {
+func calculateSignature(provider IntegrityProvider, data []byte, secret []byte, alg IntegrityAlgorithm, isLegacyTDF bool) (string, error) {
 	if alg == HS256 {
-		hmac := ocrypto.CalculateSHA256Hmac(secret, data)
+		hmac, err := provider.HMACSHA256(secret, data)
+		if err != nil {
+			return "", err
+		}
 		if isLegacyTDF {
 			return hex.EncodeToString(hmac), nil
 		}

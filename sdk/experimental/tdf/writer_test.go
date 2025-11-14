@@ -5,7 +5,9 @@ package tdf
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -58,6 +60,7 @@ func TestWriterEndToEnd(t *testing.T) {
 		{"GetManifestIncludesInitialPolicy", testGetManifestIncludesInitialPolicy},
 		{"SparseIndicesInOrder", testSparseIndicesInOrder},
 		{"SparseIndicesOutOfOrder", testSparseIndicesOutOfOrder},
+		{"CryptoProviderInjection", testCryptoProviderInjection},
 	}
 
 	for _, tc := range testCases {
@@ -186,6 +189,35 @@ func testSparseIndicesOutOfOrder(t *testing.T) {
 		expectedPlain += sizes[idx]
 	}
 	assert.Equal(t, int64(expectedPlain), fin.TotalSize)
+}
+
+func testCryptoProviderInjection(t *testing.T) {
+	ctx := t.Context()
+	provider := newCountingCryptoProvider()
+	attrs := []*policy.Value{
+		createTestAttribute("https://example.com/attr/Provider/value/Test", testKAS1, "kid1"),
+	}
+
+	writer, err := NewWriter(ctx, WithCryptoProvider(provider))
+	require.NoError(t, err)
+
+	_, err = writer.WriteSegment(ctx, 0, []byte("payload"))
+	require.NoError(t, err)
+
+	fin, err := writer.Finalize(ctx,
+		WithAttributeValues(attrs),
+		WithEncryptedMetadata("metadata"),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, fin)
+	require.NotNil(t, fin.Manifest)
+	require.NotEmpty(t, fin.Manifest.KeyAccessObjs)
+
+	assert.Equal(t, 1, provider.randomCalls, "DEK generation should call RandomBytes once")
+	assert.GreaterOrEqual(t, provider.aesCalls, 2, "NewAESGCM should be invoked for writer and metadata")
+	assert.GreaterOrEqual(t, provider.encryptCalls, 2, "Encrypt should be used for segments and metadata")
+	assert.GreaterOrEqual(t, provider.hmacCalls, 2, "HMAC should be used for signatures and policy binding")
+	assert.GreaterOrEqual(t, provider.wrapCalls, 1, "WrapKey should be used for key access objects")
 }
 
 // testInitialAttributesOnWriter verifies that attributes/KAS supplied at
@@ -875,6 +907,119 @@ func createTestAttributeWithRule(fqn, kasURL, kid string, rule policy.AttributeR
 	}
 
 	return value
+}
+
+type countingCryptoProvider struct {
+	entropyOverride EntropySource
+	randomCalls     int
+	aesCalls        int
+	encryptCalls    int
+	wrapCalls       int
+	hmacCalls       int
+}
+
+func newCountingCryptoProvider() *countingCryptoProvider {
+	return &countingCryptoProvider{}
+}
+
+func (p *countingCryptoProvider) RandomBytes(length int) ([]byte, error) {
+	p.randomCalls++
+	if p.entropyOverride != nil {
+		return p.entropyOverride.RandomBytes(length)
+	}
+	if length < 0 {
+		return nil, fmt.Errorf("invalid length: %d", length)
+	}
+	pattern := []byte("0123456789abcdef")
+	buf := make([]byte, length)
+	for i := range buf {
+		buf[i] = pattern[i%len(pattern)]
+	}
+	return buf, nil
+}
+
+func (p *countingCryptoProvider) NewAESGCM(key []byte) (AESGCM, error) {
+	p.aesCalls++
+	return &countingAESGCM{provider: p, key: append([]byte(nil), key...)}, nil
+}
+
+func (p *countingCryptoProvider) Base64Encode(data []byte) []byte {
+	out := make([]byte, base64.StdEncoding.EncodedLen(len(data)))
+	base64.StdEncoding.Encode(out, data)
+	return out
+}
+
+func (p *countingCryptoProvider) Base64Decode(data []byte) ([]byte, error) {
+	out := make([]byte, base64.StdEncoding.DecodedLen(len(data)))
+	n, err := base64.StdEncoding.Decode(out, data)
+	if err != nil {
+		return nil, err
+	}
+	return out[:n], nil
+}
+
+func (p *countingCryptoProvider) HMACSHA256(key, data []byte) ([]byte, error) {
+	p.hmacCalls++
+	_ = key
+	_ = data
+	return bytes.Repeat([]byte{0x42}, 32), nil
+}
+
+func (p *countingCryptoProvider) WrapKey(req KeyWrapRequest) (KeyWrapResult, error) {
+	p.wrapCalls++
+	wrapped := append([]byte("wrapped-"), req.PlaintextKey...)
+	res := KeyWrapResult{
+		WrappedKey: wrapped,
+	}
+	if strings.HasPrefix(strings.ToLower(req.Algorithm), "ec:") {
+		res.Scheme = KeyWrapSchemeEC
+		res.EphemeralPublicKey = "-----BEGIN PUBLIC KEY-----\nFAKE-ECC-KEY\n-----END PUBLIC KEY-----"
+	} else {
+		res.Scheme = KeyWrapSchemeRSA
+	}
+	return res, nil
+}
+
+type countingAESGCM struct {
+	provider *countingCryptoProvider
+	key      []byte
+}
+
+func (a *countingAESGCM) Encrypt(plaintext []byte) ([]byte, error) {
+	a.provider.encryptCalls++
+	iv := []byte("nonce-123456")
+	return append(append(iv, plaintext...), []byte("-tag")...), nil
+}
+
+func (a *countingAESGCM) EncryptWithIV(iv, plaintext []byte) ([]byte, error) {
+	a.provider.encryptCalls++
+	return append(append(append([]byte(nil), iv...), plaintext...), []byte("-tag")...), nil
+}
+
+func (a *countingAESGCM) EncryptWithIVAndTagSize(iv, plaintext []byte, tagSize int) ([]byte, error) {
+	a.provider.encryptCalls++
+	return append(append([]byte(nil), plaintext...), bytes.Repeat([]byte{'T'}, tagSize)...), nil
+}
+
+func (a *countingAESGCM) Decrypt(ciphertext []byte) ([]byte, error) {
+	if len(ciphertext) <= len("nonce-123456")+len("-tag") {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+	return append([]byte(nil), ciphertext[len("nonce-123456"):len(ciphertext)-len("-tag")]...), nil
+}
+
+func (a *countingAESGCM) DecryptWithTagSize(ciphertext []byte, tagSize int) ([]byte, error) {
+	if len(ciphertext) < tagSize {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+	return append([]byte(nil), ciphertext[:len(ciphertext)-tagSize]...), nil
+}
+
+func (a *countingAESGCM) DecryptWithIVAndTagSize(iv, ciphertext []byte, tagSize int) ([]byte, error) {
+	if len(ciphertext) < tagSize {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+	return append([]byte(nil), ciphertext[:len(ciphertext)-tagSize]...), nil
 }
 
 // validateManifestSchema validates a TDF manifest against the JSON schema

@@ -126,6 +126,25 @@
 //   - CRC aggregation via combine over per-segment CRCs
 //   - Minimal allocation patterns for high-throughput scenarios
 //
+// # WASM Host Integration
+//
+// When compiled with `GOOS=wasip1 GOARCH=wasm`, the writer relies on a host supplied
+// cryptographic provider. The module imports the following functions from the
+// `hostcrypto` namespace:
+//
+//   - `random_bytes(ptr, len)` – fills linear memory with random data.
+//   - `hmac_sha256(keyPtr, keyLen, dataPtr, dataLen, outPtr)` – writes a 32 byte HMAC.
+//   - `aes_gcm_encrypt*` / `aes_gcm_decrypt*` – perform AES-GCM operations with and
+//     without caller supplied IVs and tag sizes.
+//   - `wrap_key(algPtr, algLen, pubPtr, pubLen, keyPtr, keyLen, saltPtr, saltLen,
+//     outPtr, outCap, ephPtr, ephCap)` – wraps a DEK for the specified public key and
+//     optional salt, returning the wrapped length (low 32 bits) and ephemeral key
+//     length (high 32 bits).
+//
+// Host runtimes must implement these imports to back the `CryptoProvider`. Refer to
+// `crypto_provider_wasm.go` for the binary interface details and expected buffer
+// semantics.
+//
 // Current benchmarks (100 segments, 1KB each):
 //   - Sequential: ~240μs/op, ~530KB memory/op
 //   - Out-of-order: Similar performance due to combine-based CRC approach

@@ -18,6 +18,7 @@ require (
 	buf.build/gen/go/bufbuild/protovalidate/protocolbuffers/go v1.36.6-20250603165357-b52ab10f4468.1 // indirect
 	connectrpc.com/connect v1.18.1 // indirect
 	github.com/Masterminds/semver/v3 v3.3.1 // indirect
+	github.com/bytecodealliance/wasmtime-go/v38 v38.0.1
 	github.com/cpuguy83/go-md2man/v2 v2.0.6 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0 // indirect

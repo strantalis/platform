@@ -3,6 +3,8 @@
 package tdf
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,7 +12,6 @@ import (
 	"github.com/gowebpki/jcs"
 	"github.com/lestrrat-go/jwx/v2/jwa"
 	"github.com/lestrrat-go/jwx/v2/jwt"
-	"github.com/opentdf/platform/lib/ocrypto"
 )
 
 const (
@@ -172,7 +173,10 @@ func (a Assertion) GetHash() ([]byte, error) {
 		return nil, fmt.Errorf("jcs.Transform failed: %w", err)
 	}
 
-	return ocrypto.SHA256AsHex(transformedJSON), nil
+	sha := sha256.Sum256(transformedJSON)
+	dst := make([]byte, hex.EncodedLen(len(sha)))
+	hex.Encode(dst, sha[:])
+	return dst, nil
 }
 
 func (s *Statement) UnmarshalJSON(data []byte) error {

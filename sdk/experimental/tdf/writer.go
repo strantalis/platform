@@ -15,7 +15,6 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
-	"github.com/opentdf/platform/lib/ocrypto"
 	"github.com/opentdf/platform/protocol/go/policy"
 	"github.com/opentdf/platform/sdk/experimental/tdf/keysplit"
 	"github.com/opentdf/platform/sdk/internal/zipstream"
@@ -115,8 +114,8 @@ type Writer struct {
 	maxSegmentIndex int
 
 	// Cryptographic state
-	dek   []byte         // Data Encryption Key (32-byte AES key)
-	block ocrypto.AesGcm // AES-GCM cipher for segment encryption
+	dek   []byte // Data Encryption Key (32-byte AES key)
+	block AESGCM // AES-GCM cipher for segment encryption
 
 	// Initial settings provided at Writer creation; used by Finalize if not overridden
 	initialAttributes []*policy.Value
@@ -164,17 +163,23 @@ func NewWriter(_ context.Context, opts ...Option[*WriterConfig]) (*Writer, error
 		opt(config)
 	}
 
+	if config.cryptoProvider == nil {
+		config.cryptoProvider = newDefaultCryptoProvider(config.entropySource)
+	}
+
+	provider := config.cryptoProvider
+
 	// Initialize archive writer - start with 1 segment and expand dynamically
 	archiveWriter := zipstream.NewSegmentTDFWriter(1, zipstream.WithZip64())
 
 	// Generate DEK
-	dek, err := ocrypto.RandomBytes(kKeySize)
+	dek, err := provider.RandomBytes(kKeySize)
 	if err != nil {
 		return nil, err
 	}
 
 	// Initialize AES GCM Provider
-	block, err := ocrypto.NewAESGcm(dek)
+	block, err := provider.NewAESGCM(dek)
 	if err != nil {
 		return nil, err
 	}
@@ -260,12 +265,12 @@ func (w *Writer) WriteSegment(ctx context.Context, index int, data []byte) (*Seg
 		return nil, err
 	}
 
-	segmentSig, err := calculateSignature(segmentCipher, w.dek, w.segmentIntegrityAlgorithm, false) // Don't ever hex encode new tdf's
+	segmentSig, err := calculateSignature(w.cryptoProvider, segmentCipher, w.dek, w.segmentIntegrityAlgorithm, false) // Don't ever hex encode new tdf's
 	if err != nil {
 		return nil, err
 	}
 
-	segmentHash := string(ocrypto.Base64Encode([]byte(segmentSig)))
+	segmentHash := string(w.cryptoProvider.Base64Encode([]byte(segmentSig)))
 	w.segments[index] = Segment{
 		Hash:          segmentHash,
 		Size:          int64(len(data)), // Use original data length
@@ -490,7 +495,7 @@ func (w *Writer) getManifest(ctx context.Context, cfg *WriterFinalizeConfig) (*M
 
 	encryptInfo := EncryptionInformation{
 		KeyAccessType: kSplitKeyType,
-		Policy:        string(ocrypto.Base64Encode(policyBytes)),
+		Policy:        string(w.cryptoProvider.Base64Encode(policyBytes)),
 		Method: Method{
 			Algorithm:    kGCMCipherAlgorithm,
 			IsStreamable: true,
@@ -533,7 +538,7 @@ func (w *Writer) getManifest(ctx context.Context, cfg *WriterFinalizeConfig) (*M
 			totalEncryptedSize += segment.EncryptedSize
 
 			// Decode the base64-encoded segment hash to match reader validation
-			decodedHash, err := ocrypto.Base64Decode([]byte(segment.Hash))
+			decodedHash, err := w.cryptoProvider.Base64Decode([]byte(segment.Hash))
 			if err != nil {
 				return nil, 0, 0, fmt.Errorf("failed to decode segment hash: %w", err)
 			}
@@ -543,16 +548,16 @@ func (w *Writer) getManifest(ctx context.Context, cfg *WriterFinalizeConfig) (*M
 		return nil, 0, 0, errors.New("empty segment hash")
 	}
 
-	rootSignature, err := calculateSignature(aggregateHash.Bytes(), w.dek, w.integrityAlgorithm, false)
+	rootSignature, err := calculateSignature(w.cryptoProvider, aggregateHash.Bytes(), w.dek, w.integrityAlgorithm, false)
 	if err != nil {
 		return nil, 0, 0, err
 	}
 	encryptInfo.RootSignature = RootSignature{
 		Algorithm: w.integrityAlgorithm.String(),
-		Signature: string(ocrypto.Base64Encode([]byte(rootSignature))),
+		Signature: string(w.cryptoProvider.Base64Encode([]byte(rootSignature))),
 	}
 
-	keyAccessList, err := buildKeyAccessObjects(result, policyBytes, cfg.encryptedMetadata)
+	keyAccessList, err := buildKeyAccessObjects(w.cryptoProvider, result, policyBytes, cfg.encryptedMetadata)
 	if err != nil {
 		return nil, 0, 0, err
 	}
@@ -639,7 +644,7 @@ func (w *Writer) buildAssertions(aggregateHash []byte, assertions []AssertionCon
 		completeHashBuilder.Write(aggregateHash)
 		completeHashBuilder.Write(hashOfAssertion)
 
-		encoded := ocrypto.Base64Encode(completeHashBuilder.Bytes())
+		encoded := w.cryptoProvider.Base64Encode(completeHashBuilder.Bytes())
 
 		assertionSigningKey := AssertionKey{}
 

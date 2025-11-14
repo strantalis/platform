@@ -63,13 +63,15 @@ func createTestSplitResult(kasURL, pubKey string, algorithm string) *keysplit.Sp
 }
 
 func TestBuildKeyAccessObjects(t *testing.T) {
+	provider := newDefaultCryptoProvider(nil)
+
 	t.Run("successfully creates key access objects with RSA public key", func(t *testing.T) {
 		// Test that buildKeyAccessObjects correctly processes RSA keys and creates valid KeyAccess objects
 		splitResult := createTestSplitResult(testKAS1URL, testRSAPublicKey, "rsa:2048")
 		policyBytes := []byte(testPolicyJSON)
 		metadata := testMetadata
 
-		keyAccessList, err := buildKeyAccessObjects(splitResult, policyBytes, metadata)
+		keyAccessList, err := buildKeyAccessObjects(provider, splitResult, policyBytes, metadata)
 
 		require.NoError(t, err, "Should successfully create key access objects with valid RSA key")
 		require.Len(t, keyAccessList, 1, "Should create exactly one key access object")
@@ -100,7 +102,7 @@ func TestBuildKeyAccessObjects(t *testing.T) {
 		policyBytes := []byte(testPolicyJSON)
 		metadata := testMetadata
 
-		keyAccessList, err := buildKeyAccessObjects(splitResult, policyBytes, metadata)
+		keyAccessList, err := buildKeyAccessObjects(provider, splitResult, policyBytes, metadata)
 
 		require.NoError(t, err, "Should successfully create key access objects with valid EC key")
 		require.Len(t, keyAccessList, 1, "Should create exactly one key access object")
@@ -132,7 +134,7 @@ func TestBuildKeyAccessObjects(t *testing.T) {
 			},
 		}
 
-		keyAccessList, err := buildKeyAccessObjects(splitResult, []byte(testPolicyJSON), "")
+		keyAccessList, err := buildKeyAccessObjects(provider, splitResult, []byte(testPolicyJSON), "")
 
 		require.NoError(t, err, "Should handle multiple KAS URLs")
 		assert.Len(t, keyAccessList, 2, "Should create separate KeyAccess for each KAS URL")
@@ -163,7 +165,7 @@ func TestBuildKeyAccessObjects(t *testing.T) {
 			},
 		}
 
-		keyAccessList, err := buildKeyAccessObjects(splitResult, []byte(testPolicyJSON), "")
+		keyAccessList, err := buildKeyAccessObjects(provider, splitResult, []byte(testPolicyJSON), "")
 
 		require.NoError(t, err, "Should handle missing public keys gracefully")
 		assert.Len(t, keyAccessList, 1, "Should create KeyAccess only for KAS with public key")
@@ -174,7 +176,7 @@ func TestBuildKeyAccessObjects(t *testing.T) {
 		// Test that empty metadata is handled without creating encrypted metadata
 		splitResult := createTestSplitResult(testKAS1URL, testRSAPublicKey, "rsa:2048")
 
-		keyAccessList, err := buildKeyAccessObjects(splitResult, []byte(testPolicyJSON), "")
+		keyAccessList, err := buildKeyAccessObjects(provider, splitResult, []byte(testPolicyJSON), "")
 
 		require.NoError(t, err, "Should handle empty metadata")
 		require.Len(t, keyAccessList, 1, "Should create key access object")
@@ -183,7 +185,7 @@ func TestBuildKeyAccessObjects(t *testing.T) {
 
 	t.Run("returns error for nil split result", func(t *testing.T) {
 		// Test error handling for invalid input
-		_, err := buildKeyAccessObjects(nil, []byte(testPolicyJSON), "")
+		_, err := buildKeyAccessObjects(provider, nil, []byte(testPolicyJSON), "")
 
 		require.Error(t, err, "Should return error for nil split result")
 		assert.Contains(t, err.Error(), "no splits provided", "Error should mention missing splits")
@@ -196,7 +198,7 @@ func TestBuildKeyAccessObjects(t *testing.T) {
 			KASPublicKeys: map[string]keysplit.KASPublicKey{},
 		}
 
-		_, err := buildKeyAccessObjects(splitResult, []byte(testPolicyJSON), "")
+		_, err := buildKeyAccessObjects(provider, splitResult, []byte(testPolicyJSON), "")
 
 		require.Error(t, err, "Should return error for empty splits")
 		assert.Contains(t, err.Error(), "no splits provided", "Error should mention missing splits")
@@ -219,7 +221,7 @@ func TestBuildKeyAccessObjects(t *testing.T) {
 			KASPublicKeys: map[string]keysplit.KASPublicKey{}, // Empty - no public keys
 		}
 
-		_, err = buildKeyAccessObjects(splitResult, []byte(testPolicyJSON), "")
+		_, err = buildKeyAccessObjects(provider, splitResult, []byte(testPolicyJSON), "")
 
 		require.Error(t, err, "Should return error when no key access objects can be generated")
 		assert.Contains(t, err.Error(), "no valid key access objects generated", "Error should mention no valid objects")
@@ -227,6 +229,8 @@ func TestBuildKeyAccessObjects(t *testing.T) {
 }
 
 func TestCreatePolicyBinding(t *testing.T) {
+	provider := newDefaultCryptoProvider(nil)
+
 	t.Run("creates consistent HMAC policy binding", func(t *testing.T) {
 		// Test that policy binding creates consistent HMAC hash
 		symKey := make([]byte, 32)
@@ -235,7 +239,8 @@ func TestCreatePolicyBinding(t *testing.T) {
 
 		base64Policy := string(ocrypto.Base64Encode([]byte(testPolicyJSON)))
 
-		binding := createPolicyBinding(symKey, base64Policy)
+		binding, err := createPolicyBinding(provider, symKey, base64Policy)
+		require.NoError(t, err, "Should create policy binding without error")
 		require.IsType(t, PolicyBinding{}, binding, "Should return PolicyBinding type")
 
 		policyBinding, ok := binding.(PolicyBinding)
@@ -257,8 +262,10 @@ func TestCreatePolicyBinding(t *testing.T) {
 		policy1 := string(ocrypto.Base64Encode([]byte(`{"policy": "test1"}`)))
 		policy2 := string(ocrypto.Base64Encode([]byte(`{"policy": "test2"}`)))
 
-		binding1 := createPolicyBinding(symKey, policy1)
-		binding2 := createPolicyBinding(symKey, policy2)
+		binding1, err := createPolicyBinding(provider, symKey, policy1)
+		require.NoError(t, err, "Should create policy binding for policy1")
+		binding2, err := createPolicyBinding(provider, symKey, policy2)
+		require.NoError(t, err, "Should create policy binding for policy2")
 
 		pb1, ok1 := binding1.(PolicyBinding)
 		require.True(t, ok1, "binding1 should be PolicyBinding type")
@@ -280,8 +287,10 @@ func TestCreatePolicyBinding(t *testing.T) {
 
 		policy := string(ocrypto.Base64Encode([]byte(testPolicyJSON)))
 
-		binding1 := createPolicyBinding(symKey1, policy)
-		binding2 := createPolicyBinding(symKey2, policy)
+		binding1, err := createPolicyBinding(provider, symKey1, policy)
+		require.NoError(t, err, "Should create policy binding for first key")
+		binding2, err := createPolicyBinding(provider, symKey2, policy)
+		require.NoError(t, err, "Should create policy binding for second key")
 
 		pb1, ok1 := binding1.(PolicyBinding)
 		require.True(t, ok1, "binding1 should be PolicyBinding type")
@@ -294,13 +303,15 @@ func TestCreatePolicyBinding(t *testing.T) {
 }
 
 func TestEncryptMetadata(t *testing.T) {
+	provider := newDefaultCryptoProvider(nil)
+
 	t.Run("encrypts metadata using AES-GCM", func(t *testing.T) {
 		// Test successful metadata encryption with proper structure
 		symKey := make([]byte, 32)
 		_, err := rand.Read(symKey)
 		require.NoError(t, err)
 
-		encryptedMetadata, err := encryptMetadata(symKey, testMetadata)
+		encryptedMetadata, err := encryptMetadata(provider, symKey, testMetadata)
 
 		require.NoError(t, err, "Should encrypt metadata successfully")
 		assert.NotEmpty(t, encryptedMetadata, "Should return encrypted metadata")
@@ -333,8 +344,8 @@ func TestEncryptMetadata(t *testing.T) {
 		_, err = rand.Read(symKey2)
 		require.NoError(t, err)
 
-		encrypted1, err1 := encryptMetadata(symKey1, testMetadata)
-		encrypted2, err2 := encryptMetadata(symKey2, testMetadata)
+		encrypted1, err1 := encryptMetadata(provider, symKey1, testMetadata)
+		encrypted2, err2 := encryptMetadata(provider, symKey2, testMetadata)
 
 		require.NoError(t, err1, "Should encrypt with first key")
 		require.NoError(t, err2, "Should encrypt with second key")
@@ -347,7 +358,7 @@ func TestEncryptMetadata(t *testing.T) {
 		_, err := rand.Read(symKey)
 		require.NoError(t, err)
 
-		encryptedMetadata, err := encryptMetadata(symKey, "")
+		encryptedMetadata, err := encryptMetadata(provider, symKey, "")
 
 		require.NoError(t, err, "Should handle empty metadata")
 		assert.NotEmpty(t, encryptedMetadata, "Should still return encrypted structure")
@@ -357,7 +368,7 @@ func TestEncryptMetadata(t *testing.T) {
 		// Test error handling for incorrect key size (empty key)
 		emptyKey := make([]byte, 0)
 
-		_, err := encryptMetadata(emptyKey, testMetadata)
+		_, err := encryptMetadata(provider, emptyKey, testMetadata)
 
 		require.Error(t, err, "Should return error for empty key")
 		assert.Contains(t, err.Error(), "AES-GCM", "Error should mention AES-GCM creation failure")
@@ -365,6 +376,8 @@ func TestEncryptMetadata(t *testing.T) {
 }
 
 func TestWrapKeyWithPublicKey(t *testing.T) {
+	provider := newDefaultCryptoProvider(nil)
+
 	t.Run("wraps key with RSA public key", func(t *testing.T) {
 		// Test RSA key wrapping functionality
 		symKey := make([]byte, 32)
@@ -378,7 +391,7 @@ func TestWrapKeyWithPublicKey(t *testing.T) {
 			PEM:       testRSAPublicKey,
 		}
 
-		wrappedKey, keyType, ephemeralPubKey, err := wrapKeyWithPublicKey(symKey, pubKeyInfo)
+		wrappedKey, keyType, ephemeralPubKey, err := wrapKeyWithPublicKey(provider, symKey, pubKeyInfo)
 
 		require.NoError(t, err, "Should wrap key with RSA public key")
 		assert.NotEmpty(t, wrappedKey, "Should return wrapped key")
@@ -410,7 +423,7 @@ func TestWrapKeyWithPublicKey(t *testing.T) {
 			PEM:       ecPublicKeyPEM,
 		}
 
-		wrappedKey, keyType, ephemeralPubKey, err := wrapKeyWithPublicKey(symKey, pubKeyInfo)
+		wrappedKey, keyType, ephemeralPubKey, err := wrapKeyWithPublicKey(provider, symKey, pubKeyInfo)
 
 		require.NoError(t, err, "Should wrap key with EC public key")
 		assert.NotEmpty(t, wrappedKey, "Should return wrapped key")
@@ -437,7 +450,7 @@ func TestWrapKeyWithPublicKey(t *testing.T) {
 			PEM:       "", // Empty PEM
 		}
 
-		_, _, _, err = wrapKeyWithPublicKey(symKey, pubKeyInfo)
+		_, _, _, err = wrapKeyWithPublicKey(provider, symKey, pubKeyInfo)
 
 		require.Error(t, err, "Should return error for empty PEM")
 		assert.Contains(t, err.Error(), "public key PEM is empty", "Error should mention empty PEM")
@@ -456,7 +469,7 @@ func TestWrapKeyWithPublicKey(t *testing.T) {
 			PEM:       "invalid-pem-data",
 		}
 
-		_, _, _, err = wrapKeyWithPublicKey(symKey, pubKeyInfo)
+		_, _, _, err = wrapKeyWithPublicKey(provider, symKey, pubKeyInfo)
 
 		require.Error(t, err, "Should return error for malformed PEM")
 	})
