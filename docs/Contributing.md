@@ -11,6 +11,30 @@ For end-users/consumers, see [here](./Consuming.md).
 > needed. They can also be run manually using the `migrate` command
 > (`go run github.com/opentdf/platform/service migrate up`).
 
+### Option A: Dev Stack (Minimal IdP)
+
+Use the built-in dev IdP for quick local development. This skips Keycloak and only supports the client credentials flow. It still uses Docker Compose for Postgres.
+
+1. Start the dev stack:
+   ```shell
+   go run ./service dev up
+   ```
+2. Check status:
+   ```shell
+   go run ./service dev status
+   ```
+3. Find generated configs and credentials:
+   ```shell
+   ~/.opentdf/dev/opentdf-dev.yaml
+   ~/.opentdf/dev/dev-idp.yaml
+   ```
+4. Stop the dev stack:
+   ```shell
+   go run ./service dev down
+   ```
+
+### Option B: Full Keycloak Stack
+
 1.  Configure KAS and Keycloak keys: `.github/scripts/init-temp-keys.sh`. Creates temporary keys for the local KAS and Keycloak Certificate Exchange. 
 2. `docker compose up`. Starts both the local Postgres database (contains the ABAC policy configuration data) and Keycloak (the local IdP).
    1. Note: You will have to add the ``localhost.crt`` as a trusted certificate to do TLS authentication at ``localhost:8443``. On a mac, this is `security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ./keys/localhost.crt`

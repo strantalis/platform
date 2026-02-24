@@ -23,6 +23,32 @@ https://github.com/opentdf/platform/blob/main/service/go.mod#L3
 > This resolves SIGILL with Code 134 errors when running Java processes.
 
 
+### Option A: Dev Stack (Minimal IdP)
+
+Use the built-in dev IdP to get a local platform running quickly for SDK or CLI testing. This skips Keycloak and only supports the client credentials flow. It still uses Docker Compose for Postgres.
+
+1. **Start the Dev Stack**
+   ```shell
+   go run ./service dev up
+   ```
+2. **Check Status**
+   ```shell
+   go run ./service dev status
+   ```
+3. **Find Generated Configs and Credentials**
+
+   The command prints the client credentials. The generated configs are stored at:
+   ```shell
+   ~/.opentdf/dev/opentdf-dev.yaml
+   ~/.opentdf/dev/dev-idp.yaml
+   ```
+4. **Stop the Dev Stack**
+   ```shell
+   go run ./service dev down
+   ```
+
+### Option B: Full Keycloak Stack
+
 1. **Initialize Platform Configuration**
    ```shell
    cp opentdf-dev.yaml opentdf.yaml

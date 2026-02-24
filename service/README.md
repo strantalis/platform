@@ -18,6 +18,29 @@ To get started with the OpenTDF platform make sure you are running the same Go v
 <!-- markdownlint-disable MD034 github embedded sourcecode -->
 https://github.com/opentdf/platform/blob/main/service/go.mod#L3
 
+### Option A: Dev Stack (Minimal IdP)
+
+Use the built-in dev IdP for a fast local setup. This skips Keycloak and only supports the client credentials flow. It still uses Docker Compose for Postgres.
+
+```sh
+go run ./service dev up
+```
+
+The command prints client credentials and writes configs to:
+
+```sh
+~/.opentdf/dev/opentdf-dev.yaml
+~/.opentdf/dev/dev-idp.yaml
+```
+
+Stop the stack with:
+
+```sh
+go run ./service dev down
+```
+
+### Option B: Full Keycloak Stack
+
 Start the required infrastructure with [compose-spec](https://compose-spec.io).
 
 ```sh
