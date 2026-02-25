@@ -39,7 +39,11 @@ func OnConfigUpdate(svc *Service) serviceregistry.OnConfigUpdateHook {
 			return fmt.Errorf("failed to get shared policy config: %w", err)
 		}
 		svc.config = sharedCfg
-		svc.dbClient = policydb.NewClient(svc.dbClient.Client, svc.logger, int32(sharedCfg.ListRequestLimitMax), int32(sharedCfg.ListRequestLimitDefault))
+		dbClient, err := policydb.NewClient(svc.dbClient.DBClient(), svc.logger, int32(sharedCfg.ListRequestLimitMax), int32(sharedCfg.ListRequestLimitDefault))
+		if err != nil {
+			return err
+		}
+		svc.dbClient = dbClient
 		svc.logger.Info("key management service config reloaded")
 		return nil
 	}
@@ -65,7 +69,11 @@ func NewRegistration(ns string, dbRegister serviceregistry.DBRegister) *servicer
 				}
 				ksvc.logger = srp.Logger
 				ksvc.config = cfg
-				ksvc.dbClient = policydb.NewClient(srp.DBClient, srp.Logger, int32(cfg.ListRequestLimitMax), int32(cfg.ListRequestLimitDefault))
+				dbClient, err := policydb.NewClient(srp.DBClient, srp.Logger, int32(cfg.ListRequestLimitMax), int32(cfg.ListRequestLimitDefault))
+				if err != nil {
+					panic(err)
+				}
+				ksvc.dbClient = dbClient
 
 				managersMap := make(map[string]any)
 				ksvc.keyManagerFactories = make([]registeredManagers, 0, len(srp.KeyManagerCtxFactories))

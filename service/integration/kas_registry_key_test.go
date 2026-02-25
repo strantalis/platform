@@ -2293,7 +2293,7 @@ func (s *KasRegistryKeySuite) setupAttributesForRotate(numAttrsToRotate, numAttr
 
 func (s *KasRegistryKeySuite) cleanupKeys(keyIDs []string, keyAccessServerIDs []string) {
 	// use Pgx.Exec because DELETE is only for testing and should not be part of PolicyDBClient
-	_, err := s.db.PolicyClient.Pgx.Exec(s.ctx, "DELETE FROM base_keys")
+	_, err := s.db.Exec(s.ctx, "DELETE FROM base_keys")
 	s.Require().NoError(err)
 
 	for _, id := range keyIDs {

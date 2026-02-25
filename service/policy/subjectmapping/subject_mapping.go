@@ -31,7 +31,11 @@ func OnConfigUpdate(smSvc *SubjectMappingService) serviceregistry.OnConfigUpdate
 			return fmt.Errorf("failed to get shared policy config: %w", err)
 		}
 		smSvc.config = sharedCfg
-		smSvc.dbClient = policydb.NewClient(smSvc.dbClient.Client, smSvc.logger, int32(sharedCfg.ListRequestLimitMax), int32(sharedCfg.ListRequestLimitDefault))
+		dbClient, err := policydb.NewClient(smSvc.dbClient.DBClient(), smSvc.logger, int32(sharedCfg.ListRequestLimitMax), int32(sharedCfg.ListRequestLimitDefault))
+		if err != nil {
+			return err
+		}
+		smSvc.dbClient = dbClient
 
 		smSvc.logger.Info("subject mapping service config reloaded")
 
@@ -60,7 +64,11 @@ func NewRegistration(ns string, dbRegister serviceregistry.DBRegister) *servicer
 				}
 
 				smSvc.logger = logger
-				smSvc.dbClient = policydb.NewClient(srp.DBClient, logger, int32(cfg.ListRequestLimitMax), int32(cfg.ListRequestLimitDefault))
+				dbClient, err := policydb.NewClient(srp.DBClient, logger, int32(cfg.ListRequestLimitMax), int32(cfg.ListRequestLimitDefault))
+				if err != nil {
+					panic(err)
+				}
+				smSvc.dbClient = dbClient
 				smSvc.config = cfg
 				return smSvc, nil
 			},

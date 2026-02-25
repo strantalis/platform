@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"database/sql"
-	"embed"
 	"fmt"
 	"log/slog"
 	"net"
@@ -18,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/opentdf/platform/service/logger"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 )
 
 type Table struct {
@@ -67,104 +67,29 @@ type PgxIface interface {
 	CopyFrom(ctx context.Context, tableName pgx.Identifier, columnNames []string, rowSrc pgx.CopyFromSource) (int64, error)
 }
 
-// PoolConfig holds all connection pool related configuration
-type PoolConfig struct {
-	// Maximum amount of connections to keep in the pool.
-	MaxConns int32 `mapstructure:"max_connection_count" json:"max_connection_count" default:"4"`
-
-	// Minimum amount of connections to keep in the pool.
-	MinConns int32 `mapstructure:"min_connection_count" json:"min_connection_count" default:"0"`
-
-	// Minimum amount of idle connections to keep in the pool.
-	MinIdleConns int32 `mapstructure:"min_idle_connections_count" json:"min_idle_connections_count" default:"0"`
-
-	// Maximum amount of time a connection may be reused, in seconds. Default: 3600 seconds (1 hour).
-	MaxConnLifetime int `mapstructure:"max_connection_lifetime_seconds" json:"max_connection_lifetime_seconds" default:"3600"`
-
-	// Maximum amount of time a connection may be idle before being closed, in seconds. Default: 1800 seconds (30 minutes).
-	MaxConnIdleTime int `mapstructure:"max_connection_idle_seconds" json:"max_connection_idle_seconds" default:"1800"`
-
-	// Period at which the pool will check the health of idle connections, in seconds. Default: 60 seconds (1 minute).
-	HealthCheckPeriod int `mapstructure:"health_check_period_seconds" json:"health_check_period_seconds" default:"60"`
-}
-
-type Config struct {
-	Host           string     `mapstructure:"host" json:"host" default:"localhost"`
-	Port           int        `mapstructure:"port" json:"port" default:"5432"`
-	Database       string     `mapstructure:"database" json:"database" default:"opentdf"`
-	User           string     `mapstructure:"user" json:"user" default:"postgres"`
-	Password       string     `mapstructure:"password" json:"password" default:"changeme"`
-	SSLMode        string     `mapstructure:"sslmode" json:"sslmode" default:"prefer"`
-	Schema         string     `mapstructure:"schema" json:"schema" default:"opentdf"`
-	ConnectTimeout int        `mapstructure:"connect_timeout_seconds" json:"connect_timeout_seconds" default:"15"`
-	Pool           PoolConfig `mapstructure:"pool" json:"pool"`
-
-	RunMigrations    bool      `mapstructure:"runMigrations" json:"runMigrations" default:"true"`
-	MigrationsFS     *embed.FS `mapstructure:"-" json:"-"`
-	VerifyConnection bool      `mapstructure:"verifyConnection" json:"verifyConnection" default:"true"`
-}
-
-func (c Config) LogValue() slog.Value {
-	return slog.GroupValue(
-		slog.String("host", c.Host),
-		slog.Int("port", c.Port),
-		slog.String("database", c.Database),
-		slog.String("user", c.User),
-		slog.String("password", "[REDACTED]"),
-		slog.String("sslmode", c.SSLMode),
-		slog.String("schema", c.Schema),
-		slog.Int("connect_timeout_seconds", c.ConnectTimeout),
-		slog.Group("pool",
-			slog.Int("max_connection_count", int(c.Pool.MaxConns)),
-			slog.Int("min_connection_count", int(c.Pool.MinConns)),
-			slog.Int("max_connection_lifetime_seconds", c.Pool.MaxConnLifetime),
-			slog.Int("max_connection_idle_seconds", c.Pool.MaxConnIdleTime),
-			slog.Int("health_check_period_seconds", c.Pool.HealthCheckPeriod),
-		),
-		slog.Bool("runMigrations", c.RunMigrations),
-		slog.Bool("verifyConnection", c.VerifyConnection),
-	)
-}
-
 /*
-A wrapper around a pgxpool.Pool and sql.DB reference.
-
-Each service should have a single instance of the Client to share a connection pool,
-schema (driven by the service namespace), and an embedded file system for migrations.
-
-The 'search_path' is set to the schema on connection to the database.
-
-If the database config 'runMigrations' is set to true, the client will run migrations on startup,
-once per namespace (as there should only be one embedded migrations FS per namespace).
-
-Multiple pools, schemas, or migrations per service are not supported. Multiple databases per
-PostgreSQL instance or multiple PostgreSQL servers per platform instance are not supported.
+A wrapper around a pgxpool.Pool and sql.DB reference for Postgres.
 */
-type Client struct {
+type PostgresClient struct {
 	Pgx           PgxIface
 	Logger        *logger.Logger
 	config        Config
+	pgConfig      PostgresConfig
 	ranMigrations bool
-	// This is the stdlib connection that is used for transactions
-	SQLDB *sql.DB
-	trace.Tracer
+	SQLDB         *sql.DB
+	tracer        trace.Tracer
 }
 
-/*
-Connections and pools seems to be pulled in from env vars
-We should be able to tell the platform how to run
-*/
-func New(ctx context.Context, config Config, logCfg logger.Config, tracer *trace.Tracer, o ...OptsFunc) (*Client, error) {
-	for _, f := range o {
-		config = f(config)
-	}
-
-	c := Client{
-		config: config,
+func newPostgresClient(ctx context.Context, config Config, logCfg logger.Config, tracer *trace.Tracer) (*PostgresClient, error) {
+	c := PostgresClient{
+		config:   config,
+		pgConfig: config.Postgres,
 	}
 
 	if tracer != nil {
-		c.Tracer = *tracer
+		c.tracer = *tracer
+	} else {
+		c.tracer = noop.NewTracerProvider().Tracer("db")
 	}
 
 	l, err := logger.NewLogger(logger.Config{
@@ -175,9 +100,9 @@ func New(ctx context.Context, config Config, logCfg logger.Config, tracer *trace
 	if err != nil {
 		return nil, fmt.Errorf("failed to create logger: %w", err)
 	}
-	c.Logger = l.With("schema", config.Schema)
+	c.Logger = l.With("schema", c.pgConfig.Schema)
 
-	dbConfig, err := config.buildConfig()
+	dbConfig, err := c.pgConfig.buildConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse pgx config: %w", err)
 	}
@@ -195,16 +120,14 @@ func New(ctx context.Context, config Config, logCfg logger.Config, tracer *trace
 		}
 	}
 
-	slog.Info("opening new database pool", slog.String("schema", config.Schema))
+	slog.Info("opening new database pool", slog.String("schema", c.pgConfig.Schema))
 	pool, err := pgxpool.NewWithConfig(ctx, dbConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create pgxpool: %w", err)
 	}
 	c.Pgx = pool
-	// We need to create a stdlib connection for transactions
 	c.SQLDB = stdlib.OpenDBFromPool(pool)
 
-	// Connect to the database to verify the connection
 	if c.config.VerifyConnection {
 		if err := c.Pgx.Ping(ctx); err != nil {
 			return nil, fmt.Errorf("failed to connect to database: %w", err)
@@ -214,16 +137,20 @@ func New(ctx context.Context, config Config, logCfg logger.Config, tracer *trace
 	return &c, nil
 }
 
-func (c *Client) Schema() string {
-	return c.config.Schema
-}
+func (c *PostgresClient) Driver() string { return DriverPostgres }
 
-func (c *Client) Close() {
+func (c *PostgresClient) PgxPool() PgxIface { return c.Pgx }
+
+func (c *PostgresClient) DB() *sql.DB { return c.SQLDB }
+
+func (c *PostgresClient) Tracer() trace.Tracer { return c.tracer }
+
+func (c *PostgresClient) Close() {
 	c.Pgx.Close()
 	c.SQLDB.Close()
 }
 
-func (c Config) buildConfig() (*pgxpool.Config, error) {
+func (c PostgresConfig) buildConfig() (*pgxpool.Config, error) {
 	u := fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=%s",
 		c.User,
 		url.QueryEscape(c.Password),
@@ -267,13 +194,13 @@ func (c Config) buildConfig() (*pgxpool.Config, error) {
 }
 
 // Common function for all queryRow calls
-func (c Client) QueryRow(ctx context.Context, sql string, args []interface{}) (pgx.Row, error) {
+func (c PostgresClient) QueryRow(ctx context.Context, sql string, args []interface{}) (pgx.Row, error) {
 	c.Logger.TraceContext(ctx, "sql", slog.String("sql", sql), slog.Any("args", args))
 	return c.Pgx.QueryRow(ctx, sql, args...), nil
 }
 
 // Common function for all query calls
-func (c Client) Query(ctx context.Context, sql string, args []interface{}) (pgx.Rows, error) {
+func (c PostgresClient) Query(ctx context.Context, sql string, args []interface{}) (pgx.Rows, error) {
 	c.Logger.TraceContext(ctx, "sql", slog.String("sql", sql), slog.Any("args", args))
 	r, e := c.Pgx.Query(ctx, sql, args...)
 	if e != nil {
@@ -286,7 +213,7 @@ func (c Client) Query(ctx context.Context, sql string, args []interface{}) (pgx.
 }
 
 // Common function for all exec calls
-func (c Client) Exec(ctx context.Context, sql string, args []interface{}) error {
+func (c PostgresClient) Exec(ctx context.Context, sql string, args []interface{}) error {
 	c.Logger.TraceContext(ctx, "sql", slog.String("sql", sql), slog.Any("args", args))
 	tag, err := c.Pgx.Exec(ctx, sql, args...)
 	if err != nil {

@@ -66,7 +66,8 @@ func Test_BuildConfig_ConnString(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		cfg, err := test.config.buildConfig()
+		test.config.Normalize()
+		cfg, err := test.config.Postgres.buildConfig()
 		require.NoError(t, err)
 		assert.Equal(t, test.want, cfg.ConnString())
 		// AfterConnect hook was defined when building

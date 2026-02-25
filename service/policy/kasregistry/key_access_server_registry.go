@@ -43,7 +43,11 @@ func OnConfigUpdate(kasrSvc *KeyAccessServerRegistry) serviceregistry.OnConfigUp
 			return fmt.Errorf("failed to get shared policy config: %w", err)
 		}
 		kasrSvc.config = sharedCfg
-		kasrSvc.dbClient = policydb.NewClient(kasrSvc.dbClient.Client, kasrSvc.logger, int32(sharedCfg.ListRequestLimitMax), int32(sharedCfg.ListRequestLimitDefault))
+		dbClient, err := policydb.NewClient(kasrSvc.dbClient.DBClient(), kasrSvc.logger, int32(sharedCfg.ListRequestLimitMax), int32(sharedCfg.ListRequestLimitDefault))
+		if err != nil {
+			return err
+		}
+		kasrSvc.dbClient = dbClient
 
 		kasrSvc.logger.Info("key access server registry service config reloaded")
 
@@ -73,7 +77,11 @@ func NewRegistration(ns string, dbRegister serviceregistry.DBRegister) *servicer
 				}
 
 				kasrSvc.logger = logger
-				kasrSvc.dbClient = policydb.NewClient(srp.DBClient, logger, int32(cfg.ListRequestLimitMax), int32(cfg.ListRequestLimitDefault))
+				dbClient, err := policydb.NewClient(srp.DBClient, logger, int32(cfg.ListRequestLimitMax), int32(cfg.ListRequestLimitDefault))
+				if err != nil {
+					panic(err)
+				}
+				kasrSvc.dbClient = dbClient
 				if err = kasrSvc.dbClient.SetBaseKeyOnWellKnownConfig(context.TODO()); err != nil {
 					logger.Error("error setting well-known config", slog.String("error", err.Error()))
 					panic(err)

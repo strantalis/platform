@@ -32,7 +32,11 @@ func OnConfigUpdate(ns *NamespacesService) serviceregistry.OnConfigUpdateHook {
 			return fmt.Errorf("failed to get shared policy config: %w", err)
 		}
 		ns.config = sharedCfg
-		ns.dbClient = policydb.NewClient(ns.dbClient.Client, ns.logger, int32(sharedCfg.ListRequestLimitMax), int32(sharedCfg.ListRequestLimitDefault))
+		dbClient, err := policydb.NewClient(ns.dbClient.DBClient(), ns.logger, int32(sharedCfg.ListRequestLimitMax), int32(sharedCfg.ListRequestLimitDefault))
+		if err != nil {
+			return err
+		}
+		ns.dbClient = dbClient
 
 		ns.logger.Info("namespace service config reloaded")
 
@@ -61,7 +65,11 @@ func NewRegistration(ns string, dbRegister serviceregistry.DBRegister) *servicer
 				}
 
 				nsService.logger = logger
-				nsService.dbClient = policydb.NewClient(srp.DBClient, logger, int32(cfg.ListRequestLimitMax), int32(cfg.ListRequestLimitDefault))
+				dbClient, err := policydb.NewClient(srp.DBClient, logger, int32(cfg.ListRequestLimitMax), int32(cfg.ListRequestLimitDefault))
+				if err != nil {
+					panic(err)
+				}
+				nsService.dbClient = dbClient
 				nsService.config = cfg
 
 				return nsService, nil
@@ -74,7 +82,7 @@ func NewRegistration(ns string, dbRegister serviceregistry.DBRegister) *servicer
 // Without a database connection, the service is not ready.
 func (ns NamespacesService) IsReady(ctx context.Context) error {
 	ns.logger.TraceContext(ctx, "checking readiness of namespaces service")
-	if err := ns.dbClient.SQLDB.PingContext(ctx); err != nil {
+	if err := ns.dbClient.SQLDB().PingContext(ctx); err != nil {
 		return err
 	}
 

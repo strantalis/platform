@@ -544,11 +544,15 @@ func (s *KeyManagementSuite) Test_CreateProviderConfig_NullManager_Fails() {
 	// To test the NOT NULL constraint, we need to test at the SQL level
 
 	// Use raw SQL to test NULL constraint since protobuf doesn't allow true NULL strings
-	_, err := s.db.Client.Pgx.Exec(s.ctx, "INSERT INTO "+s.db.TableName("provider_config")+" (provider_name, manager, config, metadata) VALUES ($1, NULL, $2, $3)",
+	_, err := s.db.Exec(s.ctx, "INSERT INTO "+s.db.TableName("provider_config")+" (provider_name, manager, config, metadata) VALUES ($1, NULL, $2, $3)",
 		s.testProvider, validProviderConfig, `{}`)
 
 	s.Require().Error(err)
-	s.Require().ErrorContains(err, "null value")
+	if s.db.Client.Driver() == db.DriverSQLite {
+		s.Require().ErrorContains(err, "NOT NULL")
+	} else {
+		s.Require().ErrorContains(err, "null value")
+	}
 }
 
 // Composite unique constraint tests

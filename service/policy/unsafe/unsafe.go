@@ -32,7 +32,11 @@ func OnConfigUpdate(unsafeSvc *UnsafeService) serviceregistry.OnConfigUpdateHook
 			return fmt.Errorf("failed to get shared policy config: %w", err)
 		}
 		unsafeSvc.config = sharedCfg
-		unsafeSvc.dbClient = policydb.NewClient(unsafeSvc.dbClient.Client, unsafeSvc.logger, int32(sharedCfg.ListRequestLimitMax), int32(sharedCfg.ListRequestLimitDefault))
+		dbClient, err := policydb.NewClient(unsafeSvc.dbClient.DBClient(), unsafeSvc.logger, int32(sharedCfg.ListRequestLimitMax), int32(sharedCfg.ListRequestLimitDefault))
+		if err != nil {
+			return err
+		}
+		unsafeSvc.dbClient = dbClient
 		unsafeSvc.logger.Info("unsafe service config reloaded")
 		return nil
 	}
@@ -59,7 +63,11 @@ func NewRegistration(ns string, dbRegister serviceregistry.DBRegister) *servicer
 				}
 
 				unsafeSvc.logger = logger
-				unsafeSvc.dbClient = policydb.NewClient(srp.DBClient, logger, int32(cfg.ListRequestLimitMax), int32(cfg.ListRequestLimitDefault))
+				dbClient, err := policydb.NewClient(srp.DBClient, logger, int32(cfg.ListRequestLimitMax), int32(cfg.ListRequestLimitDefault))
+				if err != nil {
+					panic(err)
+				}
+				unsafeSvc.dbClient = dbClient
 				unsafeSvc.config = cfg
 				return unsafeSvc, nil
 			},

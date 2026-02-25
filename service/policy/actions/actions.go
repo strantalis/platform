@@ -43,7 +43,11 @@ func OnConfigUpdate(actionsSvc *ActionService) serviceregistry.OnConfigUpdateHoo
 			return fmt.Errorf("failed to get shared policy config: %w", err)
 		}
 		actionsSvc.config = sharedCfg
-		actionsSvc.dbClient = policydb.NewClient(actionsSvc.dbClient.Client, actionsSvc.logger, int32(sharedCfg.ListRequestLimitMax), int32(sharedCfg.ListRequestLimitDefault))
+		dbClient, err := policydb.NewClient(actionsSvc.dbClient.DBClient(), actionsSvc.logger, int32(sharedCfg.ListRequestLimitMax), int32(sharedCfg.ListRequestLimitDefault))
+		if err != nil {
+			return err
+		}
+		actionsSvc.dbClient = dbClient
 
 		actionsSvc.logger.Info("actions service config reloaded")
 
@@ -73,7 +77,11 @@ func NewRegistration(ns string, dbRegister serviceregistry.DBRegister) *servicer
 
 				actionsSvc.logger = logger
 				actionsSvc.config = cfg
-				actionsSvc.dbClient = policydb.NewClient(srp.DBClient, logger, int32(cfg.ListRequestLimitMax), int32(cfg.ListRequestLimitDefault))
+				dbClient, err := policydb.NewClient(srp.DBClient, logger, int32(cfg.ListRequestLimitMax), int32(cfg.ListRequestLimitDefault))
+				if err != nil {
+					panic(err)
+				}
+				actionsSvc.dbClient = dbClient
 				return actionsSvc, nil
 			},
 		},

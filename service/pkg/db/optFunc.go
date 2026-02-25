@@ -9,7 +9,12 @@ type OptsFunc func(c Config) Config
 
 func WithService(name string) OptsFunc {
 	return func(c Config) Config {
-		c.Schema = strings.Join([]string{c.Schema, name}, "_")
+		baseSchema := c.Postgres.Schema
+		if baseSchema == "" {
+			baseSchema = c.Schema
+		}
+		c.Schema = strings.Join([]string{baseSchema, name}, "_")
+		c.Postgres.Schema = c.Schema
 		return c
 	}
 }

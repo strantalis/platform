@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/docker/go-connections/nat"
 	"github.com/google/uuid"
 	"github.com/opentdf/platform/service/internal/fixtures"
+	"github.com/opentdf/platform/service/pkg/db"
 	tc "github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
@@ -35,6 +37,8 @@ const note = `
  This means you must more carefully ensure container termination.
  For more information please see: https://www.testcontainers.org/
  ---------------------------------------------------------------------------------
+ Want to run these tests without Docker? Set OPENTDF_INTEGRATION_DB=sqlite.
+ ---------------------------------------------------------------------------------
  Test runner hanging at '📀 starting postgres container'?
  Try restarting Docker/Podman and running the tests again.
    Docker: docker-machine restart
@@ -54,6 +58,19 @@ func TestMain(m *testing.M) {
 	if err := defaults.Set(conf); err != nil {
 		slog.Error("could not set defaults", slog.String("error", err.Error()))
 		os.Exit(1)
+	}
+
+	if driver := strings.ToLower(os.Getenv("OPENTDF_INTEGRATION_DB")); driver != "" {
+		conf.DB.Driver = driver
+	}
+
+	if strings.ToLower(conf.DB.Driver) == db.DriverSQLite {
+		if strings.EqualFold(os.Getenv("OPENTDF_INTEGRATION_SQLITE_IN_MEMORY"), "true") {
+			conf.DB.SQLite.InMemory = true
+		}
+		fixtures.LoadFixtureData("../internal/fixtures/policy_fixtures.yaml")
+		m.Run()
+		return
 	}
 
 	/*

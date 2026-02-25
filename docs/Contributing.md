@@ -25,6 +25,22 @@ For end-users/consumers, see [here](./Consuming.md).
 Note: support was added to provision a set of fixture data into the database.
 Run `go run github.com/opentdf/platform/service provision fixtures -h` for more information.
 
+## Integration Tests
+
+The `service/integration` test suite defaults to Postgres via Testcontainers. To run the suite without Docker, you can switch to SQLite:
+
+```bash
+OPENTDF_INTEGRATION_DB=sqlite go test ./service/integration -count=1
+```
+
+To force an in-memory SQLite database during integration tests:
+
+```bash
+OPENTDF_INTEGRATION_DB=sqlite OPENTDF_INTEGRATION_SQLITE_IN_MEMORY=true go test ./service/integration -count=1
+```
+
+Note: the in-memory SQLite mode uses an isolated database per test suite to avoid cross-test contamination. If you run multiple integration suites in parallel, prefer the in-memory flag.
+
 ## Running with Distributed Tracing (OpenTelemetry)
 
 The platform incorporates OpenTelemetry for distributed tracing, providing insights into request flows and performance across services.

@@ -82,6 +82,9 @@ func (c PolicyDBClient) CreateSubjectConditionSet(ctx context.Context, s *subjec
 }
 
 func (c PolicyDBClient) GetSubjectConditionSet(ctx context.Context, id string) (*policy.SubjectConditionSet, error) {
+	if !pgtypeUUID(id).Valid {
+		return nil, db.ErrUUIDInvalid
+	}
 	cs, err := c.queries.getSubjectConditionSet(ctx, id)
 	if err != nil {
 		return nil, db.WrapIfKnownInvalidQueryErr(err)

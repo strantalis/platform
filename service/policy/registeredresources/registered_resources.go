@@ -30,7 +30,11 @@ func OnConfigUpdate(s *RegisteredResourcesService) serviceregistry.OnConfigUpdat
 			return fmt.Errorf("failed to get shared policy config: %w", err)
 		}
 		s.config = sharedCfg
-		s.dbClient = policydb.NewClient(s.dbClient.Client, s.logger, int32(sharedCfg.ListRequestLimitMax), int32(sharedCfg.ListRequestLimitDefault))
+		dbClient, err := policydb.NewClient(s.dbClient.DBClient(), s.logger, int32(sharedCfg.ListRequestLimitMax), int32(sharedCfg.ListRequestLimitDefault))
+		if err != nil {
+			return err
+		}
+		s.dbClient = dbClient
 
 		s.logger.Info("registered resources service config reloaded")
 
@@ -59,7 +63,11 @@ func NewRegistration(ns string, dbRegister serviceregistry.DBRegister) *servicer
 				}
 
 				rrService.logger = logger
-				rrService.dbClient = policydb.NewClient(srp.DBClient, logger, int32(cfg.ListRequestLimitMax), int32(cfg.ListRequestLimitDefault))
+				dbClient, err := policydb.NewClient(srp.DBClient, logger, int32(cfg.ListRequestLimitMax), int32(cfg.ListRequestLimitDefault))
+				if err != nil {
+					panic(err)
+				}
+				rrService.dbClient = dbClient
 				rrService.config = cfg
 				return rrService, nil
 			},
@@ -69,7 +77,7 @@ func NewRegistration(ns string, dbRegister serviceregistry.DBRegister) *servicer
 
 func (s *RegisteredResourcesService) IsReady(ctx context.Context) error {
 	s.logger.TraceContext(ctx, "checking readiness of registered resources service")
-	if err := s.dbClient.SQLDB.PingContext(ctx); err != nil {
+	if err := s.dbClient.SQLDB().PingContext(ctx); err != nil {
 		return err
 	}
 

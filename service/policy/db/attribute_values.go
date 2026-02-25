@@ -16,12 +16,83 @@ import (
 	"google.golang.org/protobuf/types/known/wrapperspb"
 )
 
+//nolint:nestif // SQLite path needs explicit transaction handling to avoid nested sqlite transactions.
 func (c PolicyDBClient) CreateAttributeValue(ctx context.Context, attributeID string, r *attributes.CreateAttributeValueRequest) (*policy.Value, error) {
 	value := strings.ToLower(r.GetValue())
 
 	metadataJSON, _, err := db.MarshalCreateMetadata(r.GetMetadata())
 	if err != nil {
 		return nil, err
+	}
+
+	if c.dbClient.Driver() == db.DriverSQLite {
+		var createdID string
+		sqliteQ, ok := c.queries.(sqliteQueries)
+		if !ok {
+			return nil, fmt.Errorf("expected sqlite queries, got %T", c.queries)
+		}
+
+		// Avoid nested transactions; reuse the current sqlite transaction when present.
+		if _, inTx := sqliteQ.db.(sqliteTxWrapper); inTx {
+			var createErr error
+			createdID, createErr = c.queries.createAttributeValue(ctx, createAttributeValueParams{
+				AttributeDefinitionID: attributeID,
+				Value:                 value,
+				Metadata:              metadataJSON,
+			})
+			if createErr != nil {
+				return nil, db.WrapIfKnownInvalidQueryErr(createErr)
+			}
+
+			if _, updateErr := sqliteQ.db.ExecContext(ctx, `
+UPDATE attribute_definitions
+SET values_order = json_insert(COALESCE(values_order, '[]'), '$[#]', $1)
+WHERE id = $2
+`, createdID, attributeID); updateErr != nil {
+				return nil, db.WrapIfKnownInvalidQueryErr(updateErr)
+			}
+
+			if _, updateErr := c.queries.upsertAttributeValueFqn(ctx, createdID); updateErr != nil {
+				return nil, db.WrapIfKnownInvalidQueryErr(updateErr)
+			}
+
+			return c.GetAttributeValue(ctx, createdID)
+		}
+
+		if err := c.RunInTx(ctx, func(txClient *PolicyDBClient) error {
+			var createErr error
+			createdID, createErr = txClient.queries.createAttributeValue(ctx, createAttributeValueParams{
+				AttributeDefinitionID: attributeID,
+				Value:                 value,
+				Metadata:              metadataJSON,
+			})
+			if createErr != nil {
+				return db.WrapIfKnownInvalidQueryErr(createErr)
+			}
+
+			txQueries, txOK := txClient.queries.(sqliteQueries)
+			if !txOK {
+				return fmt.Errorf("expected sqlite queries, got %T", txClient.queries)
+			}
+
+			if _, updateErr := txQueries.db.ExecContext(ctx, `
+UPDATE attribute_definitions
+SET values_order = json_insert(COALESCE(values_order, '[]'), '$[#]', $1)
+WHERE id = $2
+`, createdID, attributeID); updateErr != nil {
+				return db.WrapIfKnownInvalidQueryErr(updateErr)
+			}
+
+			if _, updateErr := txClient.queries.upsertAttributeValueFqn(ctx, createdID); updateErr != nil {
+				return db.WrapIfKnownInvalidQueryErr(updateErr)
+			}
+
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+
+		return c.GetAttributeValue(ctx, createdID)
 	}
 
 	createdID, err := c.queries.createAttributeValue(ctx, createAttributeValueParams{

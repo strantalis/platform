@@ -85,8 +85,16 @@ var (
 
 func policyDBClient(conf *config.Config) (policydb.PolicyDBClient, error) {
 	slog.Info("creating database client")
-	if !strings.HasSuffix(conf.DB.Schema, "_policy") {
-		conf.DB.Schema += "_policy"
+	if conf.DB.Driver == "" || conf.DB.Driver == db.DriverPostgres {
+		schema := conf.DB.Postgres.Schema
+		if schema == "" {
+			schema = conf.DB.Schema
+		}
+		if !strings.HasSuffix(schema, "_policy") {
+			schema += "_policy"
+		}
+		conf.DB.Schema = schema
+		conf.DB.Postgres.Schema = schema
 	}
 	dbClient, err := db.New(context.Background(), conf.DB, conf.Logger, nil, db.WithMigrations(policy.Migrations))
 	if err != nil {
@@ -109,7 +117,7 @@ func policyDBClient(conf *config.Config) (policydb.PolicyDBClient, error) {
 		limitMax     int32 = 2500
 	)
 
-	return policydb.NewClient(dbClient, logger, limitMax, limitDefault), nil
+	return policydb.NewClient(dbClient, logger, limitMax, limitDefault)
 }
 
 func init() {

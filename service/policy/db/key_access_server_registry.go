@@ -280,6 +280,9 @@ func (c PolicyDBClient) UpdateKeyAccessServer(ctx context.Context, id string, r 
 }
 
 func (c PolicyDBClient) DeleteKeyAccessServer(ctx context.Context, id string) (*policy.KeyAccessServer, error) {
+	if !pgtypeUUID(id).Valid {
+		return nil, db.ErrUUIDInvalid
+	}
 	count, err := c.queries.deleteKeyAccessServer(ctx, id)
 	if err != nil {
 		return nil, db.WrapIfKnownInvalidQueryErr(err)

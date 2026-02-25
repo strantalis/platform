@@ -1855,27 +1855,27 @@ func (s *AttributeFqnSuite) Test_GrantsAreReturned() {
 
 	// Create NS Grant
 	// use Pgx.Exec because INSERT is only for testing and should not be part of PolicyDBClient
-	nsGrant, err := s.db.PolicyClient.Pgx.Exec(s.ctx,
+	nsGrant, err := s.db.Exec(s.ctx,
 		`INSERT INTO attribute_namespace_key_access_grants (namespace_id, key_access_server_id) VALUES ($1, $2)`,
 		ns.GetId(), kas.GetId())
 	s.Require().NoError(err)
-	s.NotNil(nsGrant.RowsAffected())
+	s.NotZero(nsGrant)
 
 	// Create Attribute Grant
 	// use Pgx.Exec because INSERT is only for testing and should not be part of PolicyDBClient
-	attrGrant, err := s.db.PolicyClient.Pgx.Exec(s.ctx,
+	attrGrant, err := s.db.Exec(s.ctx,
 		`INSERT INTO attribute_definition_key_access_grants (attribute_definition_id, key_access_server_id) VALUES ($1, $2)`,
 		attr.GetId(), kas.GetId())
 	s.Require().NoError(err)
-	s.NotNil(attrGrant.RowsAffected())
+	s.NotZero(attrGrant)
 
 	// Create Value Grant
 	// use Pgx.Exec because INSERT is only for testing and should not be part of PolicyDBClient
-	valueGrant, err := s.db.PolicyClient.Pgx.Exec(s.ctx,
+	valueGrant, err := s.db.Exec(s.ctx,
 		`INSERT INTO attribute_value_key_access_grants (attribute_value_id, key_access_server_id) VALUES ($1, $2)`,
 		attr.GetValues()[0].GetId(), kas.GetId())
 	s.Require().NoError(err)
-	s.NotNil(valueGrant.RowsAffected())
+	s.NotZero(valueGrant)
 
 	// Get Namespace check for grant
 	nsGet, err := s.db.PolicyClient.GetNamespace(s.ctx, ns.GetId())

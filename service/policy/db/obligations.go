@@ -317,6 +317,12 @@ func (c PolicyDBClient) UpdateObligation(ctx context.Context, r *obligations.Upd
 }
 
 func (c PolicyDBClient) DeleteObligation(ctx context.Context, r *obligations.DeleteObligationRequest) (*policy.Obligation, error) {
+	if id := r.GetId(); id != "" {
+		if !pgtypeUUID(id).Valid {
+			return nil, db.ErrUUIDInvalid
+		}
+	}
+
 	nsFQN, oblName := identifier.BreakOblFQN(r.GetFqn())
 	queryParams := deleteObligationParams{
 		ID:           pgtypeText(r.GetId()),
@@ -617,6 +623,12 @@ func (c PolicyDBClient) UpdateObligationValue(ctx context.Context, r *obligation
 }
 
 func (c PolicyDBClient) DeleteObligationValue(ctx context.Context, r *obligations.DeleteObligationValueRequest) (*policy.ObligationValue, error) {
+	if id := r.GetId(); id != "" {
+		if !pgtypeUUID(id).Valid {
+			return nil, db.ErrUUIDInvalid
+		}
+	}
+
 	nsFQN, oblName, valName := identifier.BreakOblValFQN(r.GetFqn())
 	queryParams := deleteObligationValueParams{
 		ID:           pgtypeText(r.GetId()),

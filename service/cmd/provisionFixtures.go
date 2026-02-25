@@ -55,14 +55,17 @@ You can clear/recycle your database with 'docker compose down' and 'docker compo
 				panic(fmt.Errorf("could not load config: %w", err))
 			}
 
+			// update the schema (postgres only)
+			if cfg.DB.Driver == "" || cfg.DB.Driver == db.DriverPostgres {
+				cfg.DB.Schema += "_policy"
+				cfg.DB.Postgres.Schema = cfg.DB.Schema
+			}
+
 			dbClient, err := db.New(ctx, cfg.DB, cfg.Logger, nil)
 			if err != nil {
 				panic(fmt.Errorf("issue creating database client: %w", err))
 			}
 			defer dbClient.Close()
-
-			// update the schema
-			cfg.DB.Schema += "_policy"
 
 			dbI := fixtures.NewDBInterface(ctx, *cfg)
 			f := fixtures.NewFixture(dbI)

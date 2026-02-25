@@ -269,6 +269,56 @@ func (c PolicyDBClient) DeactivateNamespace(ctx context.Context, id string) (*po
 		c.logger.Warn("deactivating the namespace with existing attributes can affect access to related data. Please be aware and proceed accordingly.")
 	}
 
+	if c.dbClient.Driver() == db.DriverSQLite {
+		if err := c.RunInTx(ctx, func(txClient *PolicyDBClient) error {
+			count, countErr := txClient.queries.updateNamespace(ctx, updateNamespaceParams{
+				ID:     id,
+				Active: pgtypeBool(false),
+			})
+			if countErr != nil {
+				return db.WrapIfKnownInvalidQueryErr(countErr)
+			}
+			if count == 0 {
+				return db.ErrNotFound
+			}
+
+			sqliteQueries, ok := txClient.queries.(sqliteQueries)
+			if !ok {
+				return fmt.Errorf("expected sqlite queries, got %T", txClient.queries)
+			}
+
+			if _, deactivateAttrsErr := sqliteQueries.db.ExecContext(ctx, `
+UPDATE attribute_definitions
+SET
+	active = FALSE,
+	updated_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE namespace_id = $1
+`, id); deactivateAttrsErr != nil {
+				return db.WrapIfKnownInvalidQueryErr(deactivateAttrsErr)
+			}
+
+			if _, deactivateValsErr := sqliteQueries.db.ExecContext(ctx, `
+UPDATE attribute_values
+SET
+	active = FALSE,
+	updated_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE attribute_definition_id IN (
+	SELECT id FROM attribute_definitions WHERE namespace_id = $1
+)
+`, id); deactivateValsErr != nil {
+				return db.WrapIfKnownInvalidQueryErr(deactivateValsErr)
+			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+
+		return &policy.Namespace{
+			Id:     id,
+			Active: &wrapperspb.BoolValue{Value: false},
+		}, nil
+	}
+
 	count, err := c.queries.updateNamespace(ctx, updateNamespaceParams{
 		ID:     id,
 		Active: pgtypeBool(false),

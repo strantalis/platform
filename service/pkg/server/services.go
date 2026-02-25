@@ -176,7 +176,7 @@ func startServices(ctx context.Context, params startServicesParams) (func(), err
 			}
 		}
 
-		var svcDBClient *db.Client
+		var svcDBClient db.Client
 		tracer := otel.Tracer(tracing.ServiceName)
 
 		for _, svc := range namespace.Services {
@@ -290,7 +290,7 @@ func extractServiceLoggerConfig(cfg config.ServiceConfig) (string, error) {
 // newServiceDBClient creates a new database client for the specified namespace.
 // It initializes the client with the provided context, logger configuration, database configuration,
 // namespace, and migrations. It returns the created client and any error encountered during creation.
-func newServiceDBClient(ctx context.Context, logCfg logging.Config, dbCfg db.Config, trace trace.Tracer, ns string, migrations *embed.FS) (*db.Client, error) {
+func newServiceDBClient(ctx context.Context, logCfg logging.Config, dbCfg db.Config, trace trace.Tracer, ns string, migrations *embed.FS) (db.Client, error) {
 	var err error
 
 	client, err := db.New(ctx, dbCfg, logCfg, &trace,
@@ -308,7 +308,7 @@ func newServiceDBClient(ctx context.Context, logCfg logging.Config, dbCfg db.Con
 // It checks if the client is required, if the required migrations have already been ran,
 // if the service does not require a database, or if the migrations are disabled.
 // It returns a string indicating the reason for the determined status.
-func determineStatusOfMigration(client *db.Client) string {
+func determineStatusOfMigration(client db.Client) string {
 	required := (client != nil)
 	requiredAlreadyRan := required && client.MigrationsEnabled() && client.RanMigrations()
 	noDBRequired := !required

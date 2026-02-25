@@ -26,7 +26,7 @@ var (
 		Use:   "up [service, ...]",
 		Short: "Run database migrations up to the latest version",
 		Run: func(cmd *cobra.Command, args []string) {
-			migrateService(cmd, args, func(dbClient *db.Client, fs *embed.FS) {
+			migrateService(cmd, args, func(dbClient db.Client, fs *embed.FS) {
 				if _, err := dbClient.RunMigrations(cmd.Context(), fs); err != nil {
 					panic(fmt.Errorf("migration up failed: %w", err))
 				}
@@ -38,7 +38,7 @@ var (
 		Use:   "down [service, ...]",
 		Short: "Run database migration down one version",
 		Run: func(cmd *cobra.Command, args []string) {
-			migrateService(cmd, args, func(dbClient *db.Client, fs *embed.FS) {
+			migrateService(cmd, args, func(dbClient db.Client, fs *embed.FS) {
 				if err := dbClient.MigrationDown(cmd.Context(), fs); err != nil {
 					panic(fmt.Errorf("migration down failed: %w", err))
 				}
@@ -71,7 +71,7 @@ var (
 	}
 )
 
-func migrateService(cmd *cobra.Command, args []string, migrationFunc func(*db.Client, *embed.FS)) {
+func migrateService(cmd *cobra.Command, args []string, migrationFunc func(db.Client, *embed.FS)) {
 	// get all the services
 	allSvcs := make([]string, 0, len(serviceMigrations))
 	for k := range serviceMigrations {
@@ -118,7 +118,7 @@ func migrateService(cmd *cobra.Command, args []string, migrationFunc func(*db.Cl
 	}
 }
 
-func migrateDBClient(cmd *cobra.Command, opts ...db.OptsFunc) (*db.Client, error) {
+func migrateDBClient(cmd *cobra.Command, opts ...db.OptsFunc) (db.Client, error) {
 	configFile, _ := cmd.Flags().GetString(configFileFlag)
 	configKey, _ := cmd.Flags().GetString(configKeyFlag)
 	legacyLoader, err := config.NewLegacyLoader(configKey, configFile)

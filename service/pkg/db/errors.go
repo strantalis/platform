@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/mattn/go-sqlite3"
 	"github.com/opentdf/platform/service/logger"
 )
 
@@ -46,6 +47,9 @@ var (
 
 // Get helpful error message for PostgreSQL violation
 func WrapIfKnownInvalidQueryErr(err error) error {
+	if err != nil && strings.Contains(err.Error(), "key_access_server has keys") {
+		return errors.Join(ErrForeignKeyViolation, err)
+	}
 	if e := isPgError(err); e != nil {
 		slog.Error("encountered database error", slog.Any("error", e))
 		switch e.Code {
@@ -74,6 +78,21 @@ func WrapIfKnownInvalidQueryErr(err error) error {
 			return e
 		}
 	}
+	if e := isSQLiteError(err); e != nil {
+		slog.Error("encountered database error", slog.Any("error", e))
+		switch e.ExtendedCode {
+		case sqlite3.ErrConstraintUnique, sqlite3.ErrConstraintPrimaryKey:
+			return errors.Join(ErrUniqueConstraintViolation, e)
+		case sqlite3.ErrConstraintNotNull:
+			return errors.Join(ErrNotNullViolation, e)
+		case sqlite3.ErrConstraintForeignKey:
+			return errors.Join(ErrForeignKeyViolation, e)
+		case sqlite3.ErrConstraintCheck:
+			return errors.Join(ErrCheckViolation, e)
+		default:
+			return e
+		}
+	}
 	return err
 }
 
@@ -93,6 +112,17 @@ func isPgError(err error) *pgconn.PgError {
 			Code:    pgerrcode.CaseNotFound,
 			Message: "err: no rows in result set",
 		}
+	}
+	return nil
+}
+
+func isSQLiteError(err error) *sqlite3.Error {
+	if err == nil {
+		return nil
+	}
+	var e sqlite3.Error
+	if errors.As(err, &e) {
+		return &e
 	}
 	return nil
 }

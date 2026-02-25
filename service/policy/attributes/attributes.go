@@ -34,7 +34,11 @@ func OnConfigUpdate(as *AttributesService) serviceregistry.OnConfigUpdateHook {
 			return fmt.Errorf("failed to get shared policy config: %w", err)
 		}
 		as.config = sharedCfg
-		as.dbClient = policydb.NewClient(as.dbClient.Client, as.logger, int32(sharedCfg.ListRequestLimitMax), int32(sharedCfg.ListRequestLimitDefault))
+		dbClient, err := policydb.NewClient(as.dbClient.DBClient(), as.logger, int32(sharedCfg.ListRequestLimitMax), int32(sharedCfg.ListRequestLimitDefault))
+		if err != nil {
+			return err
+		}
+		as.dbClient = dbClient
 
 		as.logger.Info("attributes service config reloaded")
 
@@ -64,7 +68,11 @@ func NewRegistration(ns string, dbRegister serviceregistry.DBRegister) *servicer
 				}
 				as.Tracer = srp.Tracer
 				as.logger = logger
-				as.dbClient = policydb.NewClient(srp.DBClient, logger, int32(cfg.ListRequestLimitMax), int32(cfg.ListRequestLimitDefault))
+				dbClient, err := policydb.NewClient(srp.DBClient, logger, int32(cfg.ListRequestLimitMax), int32(cfg.ListRequestLimitDefault))
+				if err != nil {
+					panic(err)
+				}
+				as.dbClient = dbClient
 				as.config = cfg
 				return as, nil
 			},

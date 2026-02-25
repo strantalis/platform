@@ -522,6 +522,45 @@ func (c PolicyDBClient) UpdateAttribute(ctx context.Context, id string, r *attri
 }
 
 func (c PolicyDBClient) DeactivateAttribute(ctx context.Context, id string) (*policy.Attribute, error) {
+	if c.dbClient.Driver() == db.DriverSQLite {
+		if err := c.RunInTx(ctx, func(txClient *PolicyDBClient) error {
+			count, countErr := txClient.queries.updateAttribute(ctx, updateAttributeParams{
+				ID:     id,
+				Active: pgtypeBool(false),
+			})
+			if countErr != nil {
+				return db.WrapIfKnownInvalidQueryErr(countErr)
+			}
+			if count == 0 {
+				return db.ErrNotFound
+			}
+
+			sqliteQueries, ok := txClient.queries.(sqliteQueries)
+			if !ok {
+				return fmt.Errorf("expected sqlite queries, got %T", txClient.queries)
+			}
+
+			if _, cascadeErr := sqliteQueries.db.ExecContext(ctx, `
+UPDATE attribute_values
+SET
+	active = FALSE,
+	updated_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE attribute_definition_id = $1
+`, id); cascadeErr != nil {
+				return db.WrapIfKnownInvalidQueryErr(cascadeErr)
+			}
+
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+
+		return &policy.Attribute{
+			Id:     id,
+			Active: &wrapperspb.BoolValue{Value: false},
+		}, nil
+	}
+
 	count, err := c.queries.updateAttribute(ctx, updateAttributeParams{
 		ID:     id,
 		Active: pgtypeBool(false),
